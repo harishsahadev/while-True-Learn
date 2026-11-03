@@ -1,0 +1,1537 @@
+---
+title: "Building consents issued — exploratory data analysis"
+subtitle: "Stats NZ, August 2026 release: what each of the 13 tables holds, and a first impression before modelling"
+author: "while True: learn() — Group 8 · STAT462 Assessment 1"
+output:
+  html_document:
+    toc: yes
+    number_sections: yes
+    toc_float: yes
+---
+
+```{=html}
+<style>
+.boxNote {
+background-color: lightblue;
+color: black;
+border: 2px solid black;
+margin: 5px;
+padding: 5px;
+font-style: italic;
+}
+</style>
+```
+
+```{r setup, include = FALSE}
+Sys.setenv(LANG = "en")
+knitr::opts_chunk$set(message = FALSE,
+                      warning = FALSE,
+                      fig.align = 'center',
+                      out.width = '75%')
+library(tidyverse)
+library(knitr)
+set.seed(462)   # project seed; this document only uses it to sample rows for display
+
+# the only line to change on another machine: the folder holding the CSVs
+# extracted from the two Stats NZ zips. Set STAT462_DATA in your .Renviron,
+# or edit the fallback. The folder must sit outside OneDrive
+data_root <- Sys.getenv("STAT462_DATA", unset = "C:/Users/Boulton/Documents/Masters Data Science/STAT462/Group Project/raw")
+```
+
+This document is the exploratory data analysis for the group project's dataset, Stats NZ's *Building consents issued: August 2026* release (published 1 October 2026, CC BY 4.0). It reads the 13 CSV tables in the release, describes what each one holds — grain, columns, dimension values, period coverage, status flags and the traps we found — and takes a first look at the three quantities our research questions are built on: the consented value per square metre of new houses (RQ1), the building profile of each district (RQ2), and whether a district's dwelling consents rise or fall from one year to the next (RQ3). It fits no models. It ends with the decisions the cleaning pipeline has to make, which the next document carries out.
+
+The tables that feed the research questions directly — the territorial authority file, the SA2 file, the per-1,000-residents file and the regional file with its seasonally adjusted series — get the full treatment. The other nine get a compact profile each, so a reader can see what the whole release contains without the document doubling in length.
+
+# Set up
+
+## Where the data lives
+
+The release comes as two zips (one with 11 CSVs, one with 2) and an Excel workbook of release tables. The zips use bzip2 compression, which base R's `unzip()` cannot read, so the CSVs are extracted once with 7-Zip into a folder outside OneDrive, and `data_root` in the setup chunk points at that folder. Nothing in this document writes to `data_root`, and no data goes into the supplementary submission zip.
+
+The first thing to check is that the folder is there and holds the files we expect. The file names are the ones Stats NZ uses inside the zips, unchanged.
+
+```{r}
+stopifnot("data_root does not exist: set STAT462_DATA or edit the fallback in the setup chunk" = dir.exists(data_root))
+
+# the 13 tables in the release, by their Stats NZ file names
+f_ta          <- "Building consents by territorial authority (Monthly).csv"
+f_region_m    <- "Building consents by region (Monthly).csv"
+f_region_q    <- "Building consents by region (Quarterly).csv"
+f_akl         <- "Building consents by Auckland local board (Monthly).csv"
+f_sector      <- "Building consents by institutional sector (Monthly).csv"
+f_control     <- "Building consents by institutional control (Monthly).csv"
+f_per1000_ta  <- "New dwellings consented per 1000 residents by territorial authority (Annual).csv"
+f_per1000_reg <- "New dwellings consented per 1000 residents by region (Annual).csv"
+f_per1000_akl <- "New dwellings consented per 1000 residents by Auckland local board (Annual).csv"
+f_outliers    <- "Non-residential outliers.csv"
+f_pctchange   <- "NZ percentage change (Monthly).csv"
+f_sa2_2026    <- "New dwellings consented by 2026 statistical area 2 (Monthly).csv"
+f_sa2_2023    <- "New dwellings consented by 2023 statistical area 2 (Monthly).csv"
+
+expected_files <- c(f_ta, f_region_m, f_region_q, f_akl, f_sector, f_control,
+                    f_per1000_ta, f_per1000_reg, f_per1000_akl,
+                    f_outliers, f_pctchange, f_sa2_2026, f_sa2_2023)
+
+# stop early if anything is missing, naming the file
+missing_files <- expected_files[!file.exists(file.path(data_root, expected_files))]
+if (length(missing_files) > 0) {
+  stop("Missing from data_root: ", paste(missing_files, collapse = "; "))
+}
+
+# sizes on disk, largest first
+tibble(file = expected_files,
+       size_mb = round(file.size(file.path(data_root, expected_files)) / 1e6, 1)) %>%
+  arrange(desc(size_mb)) %>%
+  kable(caption = "The 13 CSV files, as extracted from the two zips")
+```
+
+All 13 files are present. The territorial authority file is by far the largest at about 757 MB; the two SA2 files are about 62 MB each. Everything else is under 250 MB. Together they hold 10,358,903 rows, which the sections below confirm file by file.
+
+## Reading an Infoshare file
+
+Eleven of the thirteen files share one layout, Stats NZ's long "Infoshare" format: 14 columns, one row per series per period, with the series described by up to five `Series_title_` columns. The two SA2 files use a different, wide layout and get their own reader in their section.
+
+Two things have to be fixed at read time. `Period` is written `YYYY.MM`, so it must be read as text: as a number, October (`2025.10`) becomes `2025.1`, which is indistinguishable from January. And empty strings in the title columns are missing values, not a category. Everything else is declared explicitly so a changed file fails loudly rather than being guessed.
+
+```{r}
+infoshare_cols <- cols(
+  Series_reference = col_character(),
+  Period           = col_character(),   # must stay text: 2025.10 read as a number is 2025.1
+  Data_value       = col_double(),
+  Suppressed       = col_character(),
+  Status           = col_character(),
+  Units            = col_character(),
+  Magnitude        = col_integer(),
+  Subject          = col_character(),
+  Group            = col_character(),
+  Series_title_1   = col_character(),
+  Series_title_2   = col_character(),
+  Series_title_3   = col_character(),
+  Series_title_4   = col_character(),
+  Series_title_5   = col_character()
+)
+
+# read one Infoshare-format CSV from data_root
+read_infoshare <- function(file) {
+  read_csv(file.path(data_root, file),
+           col_types = infoshare_cols,
+           na = c("", "NA"),
+           progress = FALSE)
+}
+
+# turn a "YYYY.MM" period into the first day of that month
+period_to_date <- function(period) {
+  as.Date(paste0(period, ".01"), format = "%Y.%m.%d")
+}
+
+# compact profile of an Infoshare table, one row per fact
+profile_infoshare <- function(df) {
+  tibble(
+    rows           = nrow(df),
+    series         = n_distinct(df$Series_reference),
+    first_period   = min(df$Period),
+    last_period    = max(df$Period),
+    periods        = n_distinct(df$Period),
+    areas          = n_distinct(df$Series_title_1, na.rm = TRUE),
+    building_types = n_distinct(df$Series_title_2, na.rm = TRUE),
+    work_types     = n_distinct(df$Series_title_3, na.rm = TRUE),
+    measures       = n_distinct(df$Series_title_4, na.rm = TRUE),
+    adjustments    = n_distinct(df$Series_title_5, na.rm = TRUE),
+    status         = paste(sort(unique(df$Status)), collapse = ", "),
+    suppressed     = paste(sort(unique(df$Suppressed)), collapse = ", "),
+    units          = paste(sort(unique(df$Units)), collapse = ", "),
+    missing_values = sum(is.na(df$Data_value))
+  ) %>%
+    mutate(across(everything(), as.character)) %>%
+    pivot_longer(everything(), names_to = "item", values_to = "value")
+}
+```
+
+::: boxNote
+Convention for the whole project: `Period` is read as character, converted with `period_to_date()` only when a date is needed, and never parsed as a number. The same rule applies to any later Stats NZ file in Infoshare format, including the price index used to deflate dollar values.
+:::
+
+The 14 columns mean the same thing in every Infoshare file:
+
+| Column | Meaning |
+|---|---|
+| `Series_reference` | Infoshare series ID, one per series (area × building type × work × measure, and adjustment where present) |
+| `Period` | `YYYY.MM`; the quarterly file uses the quarter-end month |
+| `Data_value` | the value of that series in that period |
+| `Suppressed` | suppression flag; `n` throughout this release |
+| `Status` | `F` final, `P` provisional, `R` revised |
+| `Units` | `Number`, `Dollars` or `SQM`, matching the measure |
+| `Magnitude` | power-of-ten multiplier; `0` throughout, so values are as written |
+| `Subject` | always `Building Consents - BLD` |
+| `Group` | which table the row comes from |
+| `Series_title_1` | geography or sector |
+| `Series_title_2` | building type (26 nested categories) |
+| `Series_title_3` | nature of work: `New`, `Altered`, `New plus altered` |
+| `Series_title_4` | measure: `Number`, `Value`, `Floor area` |
+| `Series_title_5` | adjustment, regional files only: `Actual`, `Seasonally adjusted`, `Trend` |
+
+# The release at a glance
+
+Before the file-by-file sections, the whole release in one table. These counts come from `MANIFEST.md` in `04_Analysis/data-local-only/StatsNZ_Aug2026/`, where the zip entries were CRC-checked and row-counted on 3 November 2026; each section below reproduces its own file's count in R.
+
+| Table | Rows | Periods | Status | Areas |
+|---|---:|---|---|---:|
+| Building consents by territorial authority (Monthly) | 4,348,384 | 1965.04 → 2026.08 (TAs from 1990.04) | F | 69 |
+| Building consents by region (Monthly) | 1,396,468 | 1965.04 → 2026.08 | F, P, R | 22 |
+| Building consents by region (Quarterly) | 462,736 | 1965.06 → 2026.06 | F, P, R | 22 |
+| Building consents by Auckland local board (Monthly) | 1,321,488 | 1990.04 → 2026.08 | F | 21 |
+| Building consents by institutional sector (Monthly) | 458,771 | 1965.04 → 2026.08 | F | 7 |
+| Building consents by institutional control (Monthly) | 235,270 | 1965.04 → 2026.08 | F | 5 |
+| New dwellings consented per 1000 residents by territorial authority (Annual) | 25,382 | 1966.03 → 2026.08 | F, P | 68 |
+| New dwellings consented per 1000 residents by region (Annual) | 6,614 | 1966.03 → 2026.08 | F, P | 17 |
+| New dwellings consented per 1000 residents by Auckland local board (Annual) | 7,728 | 1996.01 → 2026.08 | F, P | 21 |
+| Non-residential outliers | 912 | 1990.01 → 2026.08 | F | 2 |
+| NZ percentage change (Monthly) | 1,483 | 1966.04 → 2026.08 | F, R | 2 |
+| New dwellings consented by 2026 statistical area 2 (Monthly) | 1,047,052 | 1990-04 → 2026-08 | — | 2,396 SA2 |
+| New dwellings consented by 2023 statistical area 2 (Monthly) | 1,046,615 | 1990-04 → 2026-08 | — | 2,395 SA2 |
+
+Three facts about the release as a whole shape everything that follows. The data are **aggregates, not consents**: one row is a count, a dollar value or a floor area for an area and a month, so no question about an individual consent — its processing time, its applicant, whether it was built — can be asked of it. The building types are **nested**, so summing across them double-counts; every analysis picks one level of the hierarchy. And the **dollar values are nominal and include GST**, so any comparison across years has to be deflated first.
+
+# Building consents by territorial authority (Monthly)
+
+This is the lead table: 67 territorial authorities, the area outside any TA and the New Zealand total, by month from April 1990 (the national total reaches back to April 1965), for 26 building types, three kinds of work and three measures. RQ1's district-quarter frame, RQ2's district profiles and RQ3's rising-or-falling target are all built from it.
+
+## Load
+
+The file is 757 MB and takes a minute or two to read, so this chunk is cached: knitr stores the result on disk and reuses it on the next knit. The constant columns are summarised before they are dropped, and the five columns we work with get short names — `area`, `building_type`, `work`, `measure` — which the cleaning document will use as well.
+
+```{r load-ta, cache = TRUE}
+df_ta_raw <- read_infoshare(f_ta)
+
+# facts about the columns we are about to drop, kept before dropping them
+ta_profile   <- profile_infoshare(df_ta_raw)
+ta_constants <- df_ta_raw %>%
+  summarise(across(c(Suppressed, Status, Units, Magnitude, Subject, Group, Series_title_5),
+                   ~ paste(sort(unique(.x)), collapse = " | ")))
+ta_units     <- count(df_ta_raw, Series_title_4, Units)
+
+# keep the columns that vary, with working names
+df_ta <- df_ta_raw %>%
+  dplyr::select(Series_reference, Period, Data_value,
+                area          = Series_title_1,
+                building_type = Series_title_2,
+                work          = Series_title_3,
+                measure       = Series_title_4)
+rm(df_ta_raw)
+```
+
+```{r}
+kable(ta_profile, caption = "Profile of the territorial authority file")
+```
+
+The row count matches the manifest (4,348,384), there are no missing values, and every row is final (`F`) and unsuppressed. The 9,937 series span 737 months, but only the national total covers all of them; the next table shows the split.
+
+```{r}
+df_ta %>%
+  mutate(level = if_else(area == "New Zealand", "New Zealand total", "Territorial authority or area outside")) %>%
+  group_by(level) %>%
+  summarise(areas = n_distinct(area), first_period = min(Period), last_period = max(Period), months = n_distinct(Period)) %>%
+  kable()
+```
+
+The 68 sub-national areas run from `1990.04` to `2026.08`, 437 months. The national total starts in `1965.04`, 300 months earlier, and those extra months exist only at national level. The last month, August 2026, is complete, but the quarter it belongs to is not — something the quarterly frame below has to allow for.
+
+The columns dropped above carried no information in this file:
+
+```{r}
+ta_constants %>%
+  pivot_longer(everything(), names_to = "column", values_to = "distinct values") %>%
+  kable()
+```
+
+`Series_title_5` (adjustment) is empty throughout — this file holds actual values only; seasonally adjusted and trend series live in the regional files. `Units` is not independent of the measure either:
+
+```{r}
+kable(ta_units)
+```
+
+Each measure has exactly one unit (`Floor area` → `SQM`, `Number` → `Number`, `Value` → `Dollars`), so `Units` can be dropped without loss.
+
+## The grid of series
+
+An Infoshare file is a stack of series. The question for modelling is whether the grid of area × building type × work × measure is complete, or whether some combinations are missing, which would leave holes after pivoting wide.
+
+```{r}
+combos <- df_ta %>%
+  count(building_type, work, measure, name = "rows")
+
+cat("Building type × work × measure combinations:", nrow(combos), "\n")
+
+combos %>%
+  count(rows, name = "combinations") %>%
+  kable(caption = "How many rows each combination has")
+```
+
+There are 145 combinations, not the 26 × 3 × 3 = 234 a full crossing would give. Almost all of them have exactly 30,153 rows, which is 69 areas × 437 months: a complete grid with no gaps. The handful with more rows are the national total reaching back before 1990 (up to 300 extra months); the one with 300 rows is `Miscellaneous buildings`, which exists only at national level and only before April 1990. The missing combinations are systematic rather than random:
+
+```{r}
+df_ta %>%
+  distinct(building_type, work, measure) %>%
+  count(work, measure, name = "building_types") %>%
+  pivot_wider(names_from = measure, values_from = building_types, values_fill = 0) %>%
+  kable(caption = "Number of building types with a series, by work and measure")
+```
+
+Three rules explain the whole pattern. **Floor area is recorded for new work only** — alterations have a count and a value but no area, so a value per square metre can only be computed for new buildings. **Three building types have no `New` series**: domestic outbuildings and non-building construction are counted as alterations only, and `Miscellaneous buildings` is the pre-1990 relic. And `New plus altered` carries value only, since adding a count of new buildings to a count of alterations has no meaning.
+
+```{r}
+df_ta %>%
+  group_by(building_type) %>%
+  summarise(works = paste(sort(unique(work)), collapse = ", "),
+            measures = n_distinct(measure),
+            first_period = min(Period),
+            rows = n()) %>%
+  arrange(desc(rows), building_type) %>%
+  kable(caption = "The 26 building types")
+```
+
+## The building-type hierarchy
+
+The 26 building types are nested, which the release notes describe but the file does not encode. Read from the category names, the tree is:
+
+- **All construction**
+  - **All buildings**
+    - **Residential buildings**
+      - **Dwelling units**
+        - Houses
+        - Apartments, townhouses, units, and other dwellings → Apartments · Retirement village units · Townhouses, flats, units, and other dwellings
+      - Domestic outbuildings (alterations only)
+    - **Non-residential buildings**
+      - Hotels, motels, boarding houses, and prisons → Hostels, boarding houses, and prisons · Hotels, motels, and other short-term accommodation
+      - Hospitals, nursing homes, and other health buildings
+      - Education buildings
+      - Social, cultural, and religious buildings
+      - Commercial buildings → Shops, restaurants, and bars · Office, administration, and public transport buildings
+      - Factories, industrial, and storage buildings → Storage buildings · Factories and industrial buildings
+      - Farm buildings
+      - Miscellaneous buildings (national, pre-1990 only)
+  - **Non-building construction** (alterations only)
+
+A tree inferred from names is a hypothesis, so we test every edge of it on the district-level rows. For new work, each identity is checked for all three measures across all 68 areas and 437 months. Stats NZ rounds, so a difference of up to 1 counts as exact.
+
+```{r}
+# district-level new work, one column per building type
+hier_new <- df_ta %>%
+  filter(area != "New Zealand", work == "New") %>%
+  dplyr::select(area, Period, measure, building_type, Data_value) %>%
+  pivot_wider(names_from = building_type, values_from = Data_value)
+
+hier_new %>%
+  transmute(
+    measure,
+    `Dwelling units = Houses + Apartments, townhouses, units, and other dwellings` =
+      `Dwelling units` - Houses - `Apartments, townhouses, units, and other dwellings`,
+    `Apartments, townhouses... = Apartments + Retirement village units + Townhouses, flats...` =
+      `Apartments, townhouses, units, and other dwellings` - Apartments - `Retirement village units` -
+      `Townhouses, flats, units, and other dwellings`,
+    `Residential buildings = Dwelling units (new work has no outbuildings)` =
+      `Residential buildings` - `Dwelling units`,
+    `Non-residential buildings = its 7 sub-types` =
+      `Non-residential buildings` - `Hotels, motels, boarding houses, and prisons` -
+      `Hospitals, nursing homes, and other health buildings` - `Education buildings` -
+      `Social, cultural, and religious buildings` - `Commercial buildings` -
+      `Factories, industrial, and storage buildings` - `Farm buildings`,
+    `Hotels, motels... = Hostels... + Hotels, motels, and other short-term accommodation` =
+      `Hotels, motels, boarding houses, and prisons` - `Hostels, boarding houses, and prisons` -
+      `Hotels, motels, and other short-term accommodation`,
+    `Commercial buildings = Shops... + Office...` =
+      `Commercial buildings` - `Shops, restaurants, and bars` -
+      `Office, administration, and public transport buildings`,
+    `Factories, industrial, and storage = Storage + Factories and industrial` =
+      `Factories, industrial, and storage buildings` - `Storage buildings` -
+      `Factories and industrial buildings`,
+    `All buildings = Residential + Non-residential` =
+      `All buildings` - `Residential buildings` - `Non-residential buildings`,
+    `All construction = All buildings (new work has no non-building construction)` =
+      `All construction` - `All buildings`
+  ) %>%
+  pivot_longer(-measure, names_to = "identity", values_to = "difference") %>%
+  group_by(identity) %>%
+  summarise(rows = n(),
+            max_abs_difference = max(abs(difference)),
+            share_within_1 = mean(abs(difference) <= 1)) %>%
+  kable(digits = 4, caption = "Hierarchy identities, new work, district level")
+```
+
+Every identity holds in every one of the 89,148 area-month-measure rows, with the largest difference being 1 (rounding). Two edges of the tree only exist for `New plus altered`, because outbuildings and non-building construction are alterations only. Those are checked on value, the one measure that work type carries:
+
+```{r}
+df_ta %>%
+  filter(area != "New Zealand", work == "New plus altered", measure == "Value") %>%
+  dplyr::select(area, Period, building_type, Data_value) %>%
+  pivot_wider(names_from = building_type, values_from = Data_value) %>%
+  transmute(
+    `Residential buildings = Dwelling units + Domestic outbuildings` =
+      `Residential buildings` - `Dwelling units` - `Domestic outbuildings`,
+    `All construction = All buildings + Non-building construction` =
+      `All construction` - `All buildings` - `Non-building construction`
+  ) %>%
+  pivot_longer(everything(), names_to = "identity", values_to = "difference") %>%
+  group_by(identity) %>%
+  summarise(rows = n(),
+            max_abs_difference = max(abs(difference)),
+            share_within_1 = mean(abs(difference) <= 1)) %>%
+  kable(digits = 4, caption = "Hierarchy identities that need the altered work, value, district level")
+```
+
+Both hold. Two more identities are worth confirming because the cleaning pipeline relies on them: that `New plus altered` is literally new plus altered, and that the national total is the sum of the areas. For building types with no `New` series, new is taken as zero.
+
+```{r}
+df_ta %>%
+  filter(area != "New Zealand", measure == "Value") %>%
+  dplyr::select(area, Period, building_type, work, Data_value) %>%
+  pivot_wider(names_from = work, values_from = Data_value) %>%
+  mutate(difference = coalesce(New, 0) + coalesce(Altered, 0) - `New plus altered`) %>%
+  summarise(rows = n(),
+            max_abs_difference = max(abs(difference)),
+            share_within_1 = mean(abs(difference) <= 1)) %>%
+  kable(digits = 4, caption = "New + Altered = New plus altered, value, district level")
+```
+
+```{r}
+df_ta %>%
+  filter(building_type == "Houses", work == "New", measure == "Number") %>%
+  mutate(level = if_else(area == "New Zealand", "nz_total", "sum_of_areas")) %>%
+  group_by(Period, level) %>%
+  summarise(houses = sum(Data_value), .groups = "drop") %>%
+  pivot_wider(names_from = level, values_from = houses) %>%
+  filter(!is.na(sum_of_areas)) %>%
+  mutate(difference = nz_total - sum_of_areas) %>%
+  summarise(months = n(),
+            max_abs_difference = max(abs(difference)),
+            share_exact = mean(difference == 0)) %>%
+  kable(caption = "New Zealand = sum of 67 TAs + area outside, new houses")
+```
+
+The national total equals the sum of the 68 areas in every one of the 437 months. The only place the tree does not add up is the national rows before April 1990, where the sub-categories do not exist yet; that is a structural break in the series, not an error.
+
+::: boxNote
+Rule for every later document: pick one level of the hierarchy and never add across levels. `Dwelling units` is the total of new homes; `Houses` is stand-alone houses only; the three multi-unit types sit under `Apartments, townhouses, units, and other dwellings`. Summing all 26 types counts the same consent up to five times.
+:::
+
+## Derived tables kept for later sections
+
+Two small tables are derived here and kept for cross-checks in the Auckland and SA2 sections: new dwellings by area and month, and the Auckland row on its own. They are cached because the chunks that use them are cached too.
+
+```{r ta-derived, cache = TRUE, dependson = "load-ta"}
+dwelling_types <- c("Dwelling units", "Houses", "Apartments",
+                    "Retirement village units", "Townhouses, flats, units, and other dwellings")
+
+# new dwellings consented by area and month, one column per dwelling type
+ta_month_dwellings <- df_ta %>%
+  filter(area != "New Zealand", work == "New", measure == "Number",
+         building_type %in% dwelling_types) %>%
+  mutate(month = period_to_date(Period)) %>%
+  dplyr::select(area, month, building_type, Data_value) %>%
+  pivot_wider(names_from = building_type, values_from = Data_value)
+
+# Auckland's new dwelling units by month, for the local board roll-up check
+ta_auckland_dwellings <- df_ta %>%
+  filter(area == "Auckland", building_type == "Dwelling units", work == "New", measure == "Number") %>%
+  dplyr::select(Period, ta_auckland = Data_value)
+
+dim(ta_month_dwellings)
+```
+
+29,716 rows: 68 areas × 437 months.
+
+## National picture
+
+Before going to district level, the national series show what the country builds and how that has changed. Calendar years 1991–2025 are complete; 1990 and 2026 are partial and left out.
+
+```{r}
+nz_annual <- df_ta %>%
+  filter(area == "New Zealand", work == "New", measure == "Number",
+         building_type %in% c("Houses", "Dwelling units")) %>%
+  mutate(year = as.integer(substr(Period, 1, 4))) %>%
+  filter(year >= 1991, year <= 2025) %>%
+  group_by(year, building_type) %>%
+  summarise(number = sum(Data_value), .groups = "drop") %>%
+  pivot_wider(names_from = building_type, values_from = number) %>%
+  mutate(multi_unit = `Dwelling units` - Houses,
+         multi_unit_share = multi_unit / `Dwelling units`)
+
+nz_annual %>%
+  filter(year %in% c(1991, 2005, 2010, 2023, 2025)) %>%
+  mutate(year = as.character(year)) %>%   # so big.mark does not print 1,991
+  kable(digits = 3, format.args = list(big.mark = ","), caption = "New dwellings consented in New Zealand, selected years")
+```
+
+```{r}
+nz_annual %>%
+  pivot_longer(c(Houses, multi_unit), names_to = "type", values_to = "dwellings") %>%
+  mutate(type = if_else(type == "Houses", "Houses", "Apartments, townhouses, units and retirement units")) %>%
+  ggplot(aes(x = year, y = dwellings, colour = type)) +
+  geom_line(linewidth = 1) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Multi-unit dwellings overtook houses in 2023",
+       x = "Year consented", y = "New dwellings consented", colour = NULL) +
+  theme(legend.position = "top")
+```
+
+The intensification story is in that one plot. Multi-unit dwellings were 29% of new homes in 1991, fell to 16% in 2010, and rose to 58% in 2023 and 55% in 2025. House numbers have moved within a band of roughly 11,000–26,000 a year for 35 years (the low was 2011, the high 2021); the growth since 2012 is largely townhouses, apartments and retirement units. This is a feature for RQ1 (the type mix of a district), a clustering dimension for RQ2, and it means `Houses` and `Dwelling units` tell different stories and should not be used interchangeably.
+
+Now the quantities RQ1 is built from, for new houses: value, floor area, and the two ratios derived from them.
+
+```{r}
+nz_houses <- df_ta %>%
+  filter(area == "New Zealand", work == "New", building_type == "Houses") %>%
+  mutate(year = as.integer(substr(Period, 1, 4))) %>%
+  filter(year >= 1991, year <= 2025) %>%
+  group_by(year, measure) %>%
+  summarise(total = sum(Data_value), .groups = "drop") %>%
+  pivot_wider(names_from = measure, values_from = total) %>%
+  rename(houses = Number, value = Value, floor_area = `Floor area`) %>%
+  mutate(dollars_per_m2 = value / floor_area,
+         m2_per_house   = floor_area / houses)
+
+nz_houses %>%
+  filter(year %in% c(1991, 2005, 2010, 2023, 2025)) %>%
+  mutate(year = as.character(year)) %>%
+  kable(digits = 0, format.args = list(big.mark = ","), caption = "New houses consented in New Zealand, selected years (nominal dollars, GST inclusive)")
+```
+
+```{r, fig.width = 9, fig.height = 4}
+nz_houses %>%
+  dplyr::select(year, dollars_per_m2, m2_per_house) %>%   # drop `value` first: it would clash with values_to
+  pivot_longer(-year, names_to = "metric", values_to = "y") %>%
+  mutate(metric = if_else(metric == "dollars_per_m2", "Consented value per m² (nominal $)", "Floor area per house (m²)")) %>%
+  ggplot(aes(x = year, y = y)) +
+  geom_line(linewidth = 1, colour = "#C76B0A") +
+  facet_wrap(~ metric, scales = "free_y") +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Nominal $/m² rose 4.7× since 1991; the average new house peaked at 218 m² in 2005",
+       x = "Year consented", y = NULL)
+```
+
+Nominal value per square metre went from $681 in 1991 to $3,226 in 2025 — a factor of 4.7. Most of that is inflation: deflated by the Capital Goods Price Index for residential buildings, the increase is about 14% (section on the price index below). The average new house grew from 153 m² in 1991 to a peak of 218 m² in 2005 and has shrunk since, to 178 m² in 2025. Both series are smooth at national level, which is what 12,000–20,000 houses a year buys; the district series will not be.
+
+## The district × quarter frame for RQ1
+
+RQ1 asks what drives the value per square metre of new houses across districts. Monthly district figures are too noisy — a small district may consent three houses one month and none the next — so the unit of analysis is the district-quarter. The 67 territorial authorities are kept; the area outside any TA is dropped. Quarters are formed from the month, and only complete quarters (three months present) are kept, which removes the partial 2026-Q3.
+
+```{r}
+districts <- df_ta %>%
+  distinct(area) %>%
+  filter(!area %in% c("New Zealand", "Area Outside Territorial Authority")) %>%
+  pull(area)
+length(districts)
+
+ta_quarter <- df_ta %>%
+  filter(area %in% districts, work == "New", building_type == "Houses") %>%
+  mutate(year    = as.integer(substr(Period, 1, 4)),
+         quarter = (as.integer(substr(Period, 6, 7)) - 1) %/% 3 + 1) %>%
+  group_by(area, year, quarter, measure) %>%
+  summarise(total = sum(Data_value), months = n(), .groups = "drop") %>%
+  pivot_wider(id_cols = c(area, year, quarter, months), names_from = measure, values_from = total) %>%
+  # keep complete quarters only
+  filter(months == 3) %>%
+  dplyr::select(-months) %>%
+  rename(houses = Number, value = Value, floor_area = `Floor area`) %>%
+  mutate(dollars_per_m2 = if_else(houses > 0 & floor_area > 0, value / floor_area, NA_real_),
+         m2_per_house   = if_else(houses > 0, floor_area / houses, NA_real_))
+
+ta_quarter %>%
+  summarise(district_quarters = n(),
+            districts         = n_distinct(area),
+            quarters          = n_distinct(paste(year, quarter)),
+            first_quarter     = paste0(min(year), "-Q", quarter[which.min(year * 10 + quarter)]),
+            last_quarter      = paste0(max(year), "-Q", quarter[which.max(year * 10 + quarter)]),
+            zero_houses       = scales::percent(mean(houses == 0), accuracy = 0.1),
+            under_5_houses    = scales::percent(mean(houses < 5), accuracy = 0.1),
+            at_least_5_houses = sum(houses >= 5)) %>%
+  mutate(across(everything(), as.character)) %>%
+  pivot_longer(everything(), names_to = "item", values_to = "value") %>%
+  kable(caption = "The RQ1 frame: new houses by district and quarter")
+```
+
+The frame has 9,715 rows: 67 districts × 145 complete quarters from 1990-Q2 to 2026-Q2. The small-number problem is visible straight away. In 2.2% of district-quarters no house was consented at all, and in 10.8% fewer than five were, which leaves 8,662 rows where a value per square metre rests on at least five houses. How small counts behave is the next question.
+
+```{r}
+ta_quarter %>%
+  ggplot(aes(x = houses)) +
+  geom_histogram(binwidth = 10, boundary = 0, fill = "#C76B0A", colour = "white") +
+  coord_cartesian(xlim = c(0, 600)) +
+  labs(title = "88% of district-quarters have fewer than 100 new houses; Auckland reaches 2,099",
+       x = "New houses consented in the quarter (axis cut at 600)", y = "District-quarters")
+```
+
+```{r}
+ta_quarter %>%
+  group_by(area) %>%
+  summarise(median_houses_per_quarter = median(houses), share_under_5 = mean(houses < 5)) %>%
+  arrange(median_houses_per_quarter) %>%
+  slice_head(n = 10) %>%
+  kable(digits = 3, caption = "The ten smallest districts by median new houses per quarter")
+```
+
+The sparse rows are concentrated in a few districts rather than spread evenly: Kawerau and the Chatham Islands have a median of zero new houses a quarter, Wairoa three, Waitomo four, and the ten smallest districts account for about three-quarters of all rows with fewer than five houses. A minimum-count rule therefore mostly removes most of a handful of districts, not random rows. The cleaning document has to decide between a minimum count of five, a higher threshold, or pooling small districts to years; this document only shows what each choice costs.
+
+The response itself, restricted to rows with at least five houses:
+
+```{r}
+ta_quarter %>%
+  filter(houses >= 5, !is.na(dollars_per_m2)) %>%
+  summarise(rows = n(),
+            min = min(dollars_per_m2),
+            p01 = quantile(dollars_per_m2, 0.01),
+            median = median(dollars_per_m2),
+            p99 = quantile(dollars_per_m2, 0.99),
+            max = max(dollars_per_m2)) %>%
+  kable(digits = 0, format.args = list(big.mark = ","), caption = "Nominal $/m² of new houses, district-quarters with 5+ houses")
+```
+
+```{r}
+ta_quarter %>%
+  filter(houses >= 5) %>%
+  ggplot(aes(x = dollars_per_m2)) +
+  geom_histogram(bins = 60, fill = "#C76B0A", colour = "white") +
+  scale_x_continuous(labels = scales::dollar) +
+  labs(title = "Nominal $/m² is right-skewed because it mixes 36 years of inflation",
+       x = "Consented value per m² of new houses (nominal, GST inclusive)", y = "District-quarters")
+```
+
+The median is about $1,281/m² and the 1st–99th percentile range is $551–$3,810, but the distribution is a mixture of years rather than a picture of any one market: a 1995 quarter and a 2025 quarter sit at opposite ends because of inflation alone. The extremes come from small counts even after the five-house cut:
+
+```{r}
+ta_quarter %>%
+  filter(houses >= 5, !is.na(dollars_per_m2)) %>%
+  arrange(dollars_per_m2) %>%
+  dplyr::slice(c(1:3, (n() - 2):n())) %>%
+  mutate(year = as.character(year)) %>%
+  kable(digits = 0, format.args = list(big.mark = ","), caption = "The three lowest and three highest $/m² rows")
+```
+
+Both tails belong to Ōpōtiki (spelt `Opotiki District` in this file) with five or six houses in the quarter. That is small-count noise, and it argues for either a higher threshold or a log-scale response that shrinks the tails. Whether the skew is still there once dollars are deflated is answered in the price index section.
+
+The cross-sectional spread is the thing RQ1 is really about, so here it is for the latest complete year, 2025, for districts with at least 50 new houses in the year.
+
+```{r}
+spread_2025 <- ta_quarter %>%
+  filter(year == 2025) %>%
+  group_by(area) %>%
+  summarise(houses = sum(houses), value = sum(value), floor_area = sum(floor_area), .groups = "drop") %>%
+  filter(houses >= 50) %>%
+  mutate(dollars_per_m2 = value / floor_area,
+         m2_per_house   = floor_area / houses) %>%
+  arrange(desc(dollars_per_m2))
+
+cat("Districts with 50+ new houses in 2025:", nrow(spread_2025), "\n")
+
+bind_rows(slice_head(spread_2025, n = 5), slice_tail(spread_2025, n = 5)) %>%
+  kable(digits = 0, format.args = list(big.mark = ","), caption = "Highest and lowest $/m² for new houses in 2025 (nominal, GST inclusive)")
+```
+
+```{r, fig.height = 9}
+spread_2025 %>%
+  ggplot(aes(x = dollars_per_m2, y = fct_reorder(area, dollars_per_m2))) +
+  geom_point(colour = "#C76B0A", size = 2) +
+  scale_x_continuous(labels = scales::dollar) +
+  labs(title = "Queenstown-Lakes is 1.7× Selwyn per square metre",
+       x = "Consented value per m² of new houses, 2025", y = NULL)
+```
+
+Forty-seven districts clear the 50-house bar. Queenstown-Lakes is highest at about $4,516/m², then Thames-Coromandel, Wellington City, Lower Hutt and Tauranga; Selwyn is lowest at about $2,593, with Waimakariri, Ashburton, Whanganui and Masterton close behind. The gap between top and bottom is 1.7×, within a single year, so it cannot be inflation. Explaining that spread — tourism and lifestyle districts and the main cities at the top, the Canterbury growth plains at the bottom — is RQ1's job. The same 2025 cross-section gives the house-size feature: a Queenstown house averages 200 m² and a Lower Hutt one 145 m², so size and cost per square metre are not simply the same thing.
+
+How the spread developed over time, for five districts that bracket it, plus the national series:
+
+```{r}
+named_districts <- c("Queenstown-Lakes District", "Wellington City", "Auckland",
+                     "Christchurch City", "Selwyn District")
+
+df_ta %>%
+  filter(area %in% c(named_districts, "New Zealand"), work == "New", building_type == "Houses") %>%
+  mutate(year = as.integer(substr(Period, 1, 4))) %>%
+  filter(year >= 1991, year <= 2025) %>%
+  group_by(area, year, measure) %>%
+  summarise(total = sum(Data_value), .groups = "drop") %>%
+  pivot_wider(names_from = measure, values_from = total) %>%
+  mutate(dollars_per_m2 = Value / `Floor area`,
+         area = factor(area, levels = c("Queenstown-Lakes District", "Wellington City", "Auckland",
+                                        "New Zealand", "Christchurch City", "Selwyn District"))) %>%
+  ggplot(aes(x = year, y = dollars_per_m2, colour = area)) +
+  geom_line(linewidth = 0.9) +
+  scale_y_continuous(labels = scales::dollar) +
+  labs(title = "The spread between these districts widened from 1.2× in the 1990s to 1.7× in 2025",
+       x = "Year consented", y = "Nominal $/m², new houses", colour = NULL) +
+  theme(legend.position = "top") +
+  guides(colour = guide_legend(nrow = 2))
+```
+
+In 1995 the five districts sat within about $110 of each other, between $660 and $770 per m², a ratio of 1.16 between the dearest and the cheapest. The ratio reached 1.5 in 2010 and 1.74 in 2025, when Queenstown-Lakes was at $4,516 and Selwyn at $2,593. The divergence is gradual and mostly after 2008, which suggests the year × district interaction matters and that a model with only additive district and year effects will miss part of the story. (A baseline check in the pitch work found year and district fixed effects explain about 63% of the variance in log real $/m².)
+
+## The rising-or-falling target for RQ3
+
+RQ3 asks whether a district's dwelling consents will rise or fall next year. The class is defined on calendar years of new dwelling units: a district-year is *rising* if the following year's count is higher. Years 1991–2024 are the observation years (2025 is needed as the "next year" of 2024).
+
+```{r}
+ta_year_dwellings <- df_ta %>%
+  filter(area %in% districts, work == "New", measure == "Number", building_type == "Dwelling units") %>%
+  mutate(year = as.integer(substr(Period, 1, 4))) %>%
+  filter(year >= 1991, year <= 2025) %>%
+  group_by(area, year) %>%
+  summarise(dwellings = sum(Data_value), .groups = "drop") %>%
+  arrange(area, year) %>%
+  group_by(area) %>%
+  mutate(dwellings_next = lead(dwellings),
+         rising = dwellings_next > dwellings) %>%
+  ungroup() %>%
+  filter(!is.na(dwellings_next))
+
+ta_year_dwellings %>%
+  count(rising) %>%
+  mutate(share = n / sum(n)) %>%
+  kable(digits = 3, caption = "District-years 1991–2024: did consents rise the following year?")
+```
+
+2,278 district-years (67 × 34), of which 51.2% were rising. The classes are balanced, which suits discriminant analysis and means accuracy is a fair headline metric. A year in which the count is unchanged counts as not rising; there are 52 such ties, and the cleaning document should decide whether they stay in the falling class or are dropped.
+
+The share of districts rising in each year shows how much of the target is the national cycle:
+
+```{r}
+ta_year_dwellings %>%
+  group_by(year) %>%
+  summarise(share_rising = mean(rising)) %>%
+  ggplot(aes(x = year, y = share_rising)) +
+  geom_col(fill = "#C76B0A") +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "The share of districts rising swings from 12% (2008) to 87% (2020)",
+       x = "Year (class refers to the following year)", y = "Share of districts rising")
+```
+
+The share swings from 12% of districts rising in 2008, the year the global financial crisis hit consents, to 87% in 2020. In 13 of the 34 years more than 70% of districts moved the same way; in the other 21 the picture is mixed. So the year carries real signal but does not decide the class on its own. A classifier that knows the year would still do better on a random split than it deserves, which is why RQ3 has to be validated on a time-ordered hold-out — random splitting would leak the national cycle into the test set.
+
+## District profiles for RQ2
+
+RQ2 clusters districts on their building profile. One dimension of that profile, the multi-unit share, already separates districts sharply in 2025:
+
+```{r}
+df_ta %>%
+  filter(area %in% districts, work == "New", measure == "Number",
+         building_type %in% c("Houses", "Dwelling units"), substr(Period, 1, 4) == "2025") %>%
+  group_by(area, building_type) %>%
+  summarise(number = sum(Data_value), .groups = "drop") %>%
+  pivot_wider(names_from = building_type, values_from = number) %>%
+  mutate(multi_unit_share = 1 - Houses / `Dwelling units`) %>%
+  filter(`Dwelling units` >= 50) %>%
+  arrange(desc(multi_unit_share)) %>%
+  dplyr::slice(c(1:5, (n() - 4):n())) %>%
+  kable(digits = 3, format.args = list(big.mark = ","), caption = "Multi-unit share of new dwellings, 2025, districts with 50+ dwellings")
+```
+
+Lower Hutt (77%), Wellington City (73%) and Porirua (69%) are majority multi-unit; 13 of the 67 districts were in 2025. At the other end, rural districts are almost entirely stand-alone houses. Other profile dimensions — growth, volatility, cost per m², house size, the non-residential share — are built in the cleaning document; this one establishes that the type mix alone already has structure worth clustering.
+
+## Traps in this table
+
+- `Period` is text and must stay text (setup section).
+- Floor area exists for `New` work only; `$/m²` is undefined for alterations.
+- Dollars are nominal and GST inclusive; deflate before comparing years.
+- 10.8% of district-quarters have fewer than five new houses; ratios there are noise.
+- `Miscellaneous buildings` and the pre-1990 months exist only at national level — filter them out before pivoting, or the wide table gets a column of `NA`.
+- Auckland is one TA and consented 43% of the country's new dwellings in 2025 (section on the local board file); it will dominate any unweighted national summary and sit alone in any cluster solution.
+- The building types are nested: pick one level.
+
+The full table is no longer needed; it is removed here to keep memory for the files that follow. The derived tables above (`ta_quarter`, `ta_year_dwellings`, `ta_month_dwellings`, `ta_auckland_dwellings`, `nz_houses`, `nz_annual`) stay.
+
+```{r}
+rm(df_ta, hier_new)
+invisible(gc())
+```
+
+# Building consents by region (Monthly)
+
+The regional file has the same layout as the TA file but a coarser geography — 16 regions, the area outside any region, the two islands, two rest-of-island groupings and the national total — and one thing the TA file lacks: **seasonally adjusted and trend series**, flagged in `Series_title_5`. It is the file to use for anything about the national or regional cycle, and the only one where `Status` is not uniformly `F`.
+
+```{r load-region-m, cache = TRUE}
+df_region_m <- read_infoshare(f_region_m)
+
+region_m_profile <- profile_infoshare(df_region_m)
+
+# status by adjustment type
+region_m_status <- df_region_m %>%
+  count(adjustment = Series_title_5, Status) %>%
+  pivot_wider(names_from = Status, values_from = n, values_fill = 0)
+
+# the areas, with the coverage of their actual series
+region_m_areas <- df_region_m %>%
+  filter(Series_title_5 == "Actual") %>%
+  group_by(area = Series_title_1) %>%
+  summarise(first_period = min(Period), last_period = max(Period),
+            series = n_distinct(Series_reference), .groups = "drop") %>%
+  arrange(first_period, area)
+
+# which series have seasonally adjusted and trend versions
+region_m_adjusted <- df_region_m %>%
+  filter(Series_title_5 != "Actual") %>%
+  group_by(adjustment = Series_title_5, building_type = Series_title_2,
+           work = Series_title_3, measure = Series_title_4) %>%
+  summarise(areas = n_distinct(Series_title_1), first_period = min(Period),
+            last_period = max(Period), .groups = "drop")
+
+# national new dwellings, actual vs seasonally adjusted vs trend, kept for a plot
+region_m_nz_dwellings <- df_region_m %>%
+  filter(Series_title_1 == "New Zealand", Series_title_2 == "Dwelling units",
+         Series_title_3 == "New", Series_title_4 == "Number", Period >= "1995.01") %>%
+  dplyr::select(Period, adjustment = Series_title_5, Status, Data_value)
+
+rm(df_region_m)
+```
+
+```{r}
+kable(region_m_profile, caption = "Profile of the regional monthly file")
+```
+
+1,396,468 rows, as in the manifest, 22 areas, the same 26 building types as the TA file, and three adjustment types. The status flags belong entirely to the adjusted series:
+
+```{r}
+kable(region_m_status, caption = "Status by adjustment type")
+```
+
+Every actual value is final. The seasonally adjusted and trend values are `R` (revised) except for the latest month, which is `P` (provisional) — Stats NZ re-estimates both every month, so these series change from release to release and are the reason the project is pinned to one release. Any model that uses them should say so.
+
+```{r}
+kable(region_m_areas, caption = "The 22 areas and the coverage of their actual series")
+```
+
+The national total runs from April 1965; the 21 regional areas all start in April 1990, like the TAs. The groupings — North Island excluding Auckland, Waikato and Wellington; South Island excluding Canterbury — are Stats NZ's own and exist so that the adjusted series can be published for them:
+
+```{r}
+kable(region_m_adjusted, caption = "Series that exist in seasonally adjusted and trend form")
+```
+
+Seasonal adjustment is published for four national series only (all buildings, residential buildings, dwelling units and houses). The trend is published for those plus non-residential buildings nationally, and for new dwelling units in six sub-national areas as well: Auckland, Waikato, Wellington, Canterbury and the two rest-of-island groupings. All adjusted series start in January 1995. There are no regional seasonally adjusted series below that, so seasonality at TA level is ours to handle — by working in quarters or years, or with a month-of-year feature.
+
+```{r}
+region_m_nz_dwellings %>%
+  mutate(month = period_to_date(Period)) %>%
+  ggplot(aes(x = month, y = Data_value, colour = adjustment)) +
+  geom_line(linewidth = 0.6) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Monthly consents are noisy; the trend series shows the three cycles since 1995",
+       x = NULL, y = "New dwellings consented per month", colour = NULL) +
+  theme(legend.position = "top")
+```
+
+The actual series shows the within-year pattern and the month-to-month noise that makes monthly district modelling unattractive; the trend shows the early-2004 peak (about 2,800 dwellings a month), the trough of 2009–2011 after the global financial crisis (about 1,050), the long rise to the early-2022 peak (about 4,300), the fall to late 2023 and the recovery since. Those cycles are the national signal that RQ3's rising-or-falling target has to be separated from.
+
+# Building consents by region (Quarterly)
+
+The quarterly file is the monthly file summed to quarters by Stats NZ, with its own seasonally adjusted and trend series. The one thing to understand about it is how a quarter is written.
+
+```{r load-region-q, cache = TRUE, dependson = "load-region-m"}
+df_region_q <- read_infoshare(f_region_q)
+
+region_q_profile <- profile_infoshare(df_region_q)
+
+region_q_status <- df_region_q %>%
+  count(adjustment = Series_title_5, Status) %>%
+  pivot_wider(names_from = Status, values_from = n, values_fill = 0)
+
+region_q_months <- df_region_q %>%
+  distinct(month_in_period = substr(Period, 6, 7)) %>%
+  arrange(month_in_period)
+
+region_q_adjusted <- df_region_q %>%
+  filter(Series_title_5 != "Actual") %>%
+  group_by(adjustment = Series_title_5, building_type = Series_title_2,
+           work = Series_title_3, measure = Series_title_4) %>%
+  summarise(areas = n_distinct(Series_title_1), first_period = min(Period),
+            last_period = max(Period), quarters = n_distinct(Period), .groups = "drop")
+
+region_q_same_areas <- setequal(unique(df_region_q$Series_title_1), region_m_areas$area)
+
+rm(df_region_q)
+```
+
+```{r}
+kable(region_q_profile, caption = "Profile of the regional quarterly file")
+kable(region_q_months, caption = "Months that appear in Period")
+```
+
+462,736 rows and the same 22 areas as the monthly file (`setequal` returns `r region_q_same_areas`). `Period` holds only `03`, `06`, `09` and `12`: a quarter is written as its **last** month, so `1990.06` is April–June 1990, the June quarter, and the file runs from the June 1965 quarter to the June 2026 quarter. The partial September 2026 quarter is not in it, which is one reason to prefer this file over summing months ourselves when a quarterly regional series is needed.
+
+```{r}
+kable(region_q_status, caption = "Status by adjustment type")
+kable(region_q_adjusted, caption = "Quarterly series with seasonally adjusted and trend versions")
+```
+
+The status pattern is the same as the monthly file: actuals final, adjusted series revised, the latest quarter provisional. The adjusted quarterly series start in the March 1995 quarter and cover 126 quarters.
+
+::: boxNote
+Our own district-quarter frame is built from the monthly TA file, not from this one, because this file has no TA geography. The two must agree where they overlap: the cleaning document should check that summing our TA quarters to regions reproduces this file's actual values, which also confirms the TA-to-region concordance it will need.
+:::
+
+# Building consents by Auckland local board (Monthly)
+
+Auckland is a single territorial authority in the TA file but consents about two-fifths of the country's new dwellings, so Stats NZ also publishes it by its 21 local boards. This file is the only sub-TA breakdown with values and floor areas (the SA2 files have counts only).
+
+```{r load-akl, cache = TRUE, dependson = "ta-derived"}
+df_akl <- read_infoshare(f_akl)
+
+akl_profile <- profile_infoshare(df_akl)
+
+akl_combos <- df_akl %>%
+  count(Series_title_2, Series_title_3, Series_title_4, name = "rows") %>%
+  count(rows, name = "combinations")
+
+akl_boards <- df_akl %>%
+  group_by(board = Series_title_1) %>%
+  summarise(first_period = min(Period), last_period = max(Period), rows = n(), .groups = "drop")
+
+akl_types <- sort(unique(df_akl$Series_title_2))
+
+# do the 21 boards add up to the Auckland row of the TA file?
+akl_rollup <- df_akl %>%
+  filter(Series_title_2 == "Dwelling units", Series_title_3 == "New", Series_title_4 == "Number") %>%
+  group_by(Period) %>%
+  summarise(boards_sum = sum(Data_value), .groups = "drop") %>%
+  inner_join(ta_auckland_dwellings, by = "Period") %>%
+  mutate(difference = boards_sum - ta_auckland)
+
+# new dwellings by board in 2025, for a first look
+akl_2025 <- df_akl %>%
+  filter(Series_title_2 == "Dwelling units", Series_title_3 == "New", Series_title_4 == "Number",
+         substr(Period, 1, 4) == "2025") %>%
+  group_by(board = Series_title_1) %>%
+  summarise(dwellings_2025 = sum(Data_value), .groups = "drop") %>%
+  arrange(desc(dwellings_2025))
+
+rm(df_akl)
+```
+
+```{r}
+kable(akl_profile, caption = "Profile of the Auckland local board file")
+kable(akl_combos, caption = "Rows per building type × work × measure combination")
+```
+
+1,321,488 rows, 21 boards, 25 building types and 144 combinations, every one of them with exactly 9,177 rows = 21 boards × 437 months. It is the same complete grid as the TA file with one type fewer:
+
+```{r}
+setdiff(unique(combos$building_type), akl_types)
+```
+
+`Miscellaneous buildings` is the one missing, as expected: it only ever existed nationally before 1990. The board file starts in April 1990 for every board, so there is nothing for it to hold.
+
+```{r}
+akl_rollup %>%
+  summarise(months = n(), max_abs_difference = max(abs(difference)), share_exact = mean(difference == 0)) %>%
+  kable(caption = "Sum of the 21 boards vs the Auckland row of the TA file, new dwelling units")
+```
+
+The boards add up to the TA file's Auckland row exactly in all 437 months, so the two files can be used together without reconciliation.
+
+```{r}
+auckland_share_2025 <- ta_month_dwellings %>%
+  filter(format(month, "%Y") == "2025") %>%
+  summarise(auckland = sum(`Dwelling units`[area == "Auckland"]),
+            all_areas = sum(`Dwelling units`)) %>%
+  mutate(share = auckland / all_areas)
+kable(auckland_share_2025, digits = 3, format.args = list(big.mark = ","), caption = "Auckland's share of new dwellings consented in 2025")
+```
+
+```{r, fig.height = 6}
+akl_2025 %>%
+  ggplot(aes(x = dwellings_2025, y = fct_reorder(board, dwellings_2025))) +
+  geom_col(fill = "#C76B0A") +
+  scale_x_continuous(labels = scales::comma) +
+  labs(title = "Auckland's 15,617 new dwellings in 2025 are spread unevenly across its 21 boards",
+       x = "New dwelling units consented, 2025", y = NULL)
+```
+
+Auckland consented 15,617 new dwellings in 2025, 42.6% of the national total, and the next largest district (Christchurch City, 4,084) consented about a quarter of that. Within Auckland the boards range from 1,612 in Howick to 6 on Great Barrier Island, so several boards are the size of a mid-ranking district. For RQ1 and RQ2 this is the Auckland problem: as one TA it is an outlier in volume, and any cluster solution will tend to put it on its own. The options are to keep it as one TA and accept that, to model the 21 boards as if they were districts (this file provides the values and floor areas to do so), or to work in per-capita terms. The decision belongs to the cleaning document; this file makes the second option possible.
+
+# Building consents by institutional sector (Monthly)
+
+The sector file splits the national totals by who applied for the consent — households, businesses, government, non-profits and the rest of the world — using the institutional sector classification from the national accounts. There is no geography in it.
+
+```{r load-sector, cache = TRUE}
+df_sector <- read_infoshare(f_sector)
+
+sector_profile <- profile_infoshare(df_sector)
+
+sector_areas <- df_sector %>%
+  group_by(sector = Series_title_1) %>%
+  summarise(first_period = min(Period), last_period = max(Period),
+            building_types = n_distinct(Series_title_2), rows = n(), .groups = "drop") %>%
+  arrange(first_period, sector)
+
+sector_series_lengths <- df_sector %>%
+  count(Series_reference, name = "periods") %>%
+  count(periods, name = "series")
+
+# who consents what: value of new work in 2025, by sector and broad building type
+sector_2025 <- df_sector %>%
+  filter(substr(Period, 1, 4) == "2025", Series_title_3 == "New", Series_title_4 == "Value",
+         Series_title_2 %in% c("Dwelling units", "Non-residential buildings")) %>%
+  group_by(building_type = Series_title_2, sector = Series_title_1) %>%
+  summarise(value = sum(Data_value), .groups = "drop") %>%
+  group_by(building_type) %>%
+  mutate(share = value / value[sector == "Total all sectors"]) %>%
+  ungroup()
+
+rm(df_sector)
+```
+
+```{r}
+kable(sector_profile, caption = "Profile of the institutional sector file")
+kable(sector_areas, caption = "The seven sectors")
+```
+
+458,771 rows and the same 145 combinations as the TA file, but not a complete grid: the sector split starts in April 1976 (December 1978 for the rest of the world), and the national total in April 1965, so series lengths vary.
+
+```{r}
+kable(sector_series_lengths, caption = "How many periods each series covers")
+```
+
+Most series have 437 periods (from April 1990); a minority reach back into the 1970s with 567–570 periods, and the pre-1990 national rows have 641 or 737. The grid is complete from April 1990 on, which is all we use.
+
+```{r}
+sector_2025 %>%
+  dplyr::select(-value) %>%
+  pivot_wider(names_from = building_type, values_from = share) %>%
+  arrange(desc(`Dwelling units`)) %>%
+  kable(digits = 3, caption = "Share of the value of new work consented in 2025, by sector")
+```
+
+Households and non-financial businesses between them hold about 97% of the value of new dwellings consented in 2025 — and, perhaps surprisingly, businesses hold about two-thirds of it and households one-third, a measure of how developer-led new housing has become. Non-residential value is split between businesses (about 62%) and general government (about 31%). The file could supply a feature for RQ1 — the share of a year's residential value consented by businesses rather than households, as a proxy for developer-led building — but only at national level, so it would vary by year alone. It is recorded here for completeness rather than for use.
+
+# Building consents by institutional control (Monthly)
+
+The control file is the sector file's companion: the same national totals split by who controls the applicant — private New Zealand, foreign, central government, local government.
+
+```{r load-control, cache = TRUE}
+df_control <- read_infoshare(f_control)
+
+control_profile <- profile_infoshare(df_control)
+
+control_areas <- df_control %>%
+  group_by(control = Series_title_1) %>%
+  summarise(first_period = min(Period), last_period = max(Period),
+            building_types = n_distinct(Series_title_2), rows = n(), .groups = "drop") %>%
+  arrange(first_period, control)
+
+control_2025 <- df_control %>%
+  filter(substr(Period, 1, 4) == "2025", Series_title_3 == "New", Series_title_4 == "Value",
+         Series_title_2 %in% c("Dwelling units", "Non-residential buildings")) %>%
+  group_by(building_type = Series_title_2, control = Series_title_1) %>%
+  summarise(value = sum(Data_value), .groups = "drop") %>%
+  group_by(building_type) %>%
+  mutate(share = value / value[control == "Total all controls"]) %>%
+  ungroup()
+
+rm(df_control)
+```
+
+```{r}
+kable(control_profile, caption = "Profile of the institutional control file")
+kable(control_areas, caption = "The five control categories")
+```
+
+235,270 rows, five categories, final throughout. The coverage is uneven in a way that matters if anyone wants to use it: central government control starts in January 1974 and local government in April 1990, but the **private and foreign split only starts in March 2015**, so before then the file only separates government from everything else.
+
+```{r}
+control_2025 %>%
+  dplyr::select(-value) %>%
+  pivot_wider(names_from = building_type, values_from = share) %>%
+  arrange(desc(`Dwelling units`)) %>%
+  kable(digits = 3, caption = "Share of the value of new work consented in 2025, by control")
+```
+
+New dwellings are almost entirely under private New Zealand control (about 95% of value in 2025, with foreign control at about 1%); government control is concentrated in non-residential building, where central and local government together hold about a third of the value. Like the sector file, this is national only and is not used in our research questions.
+
+# New dwellings consented per 1000 residents by territorial authority (Annual)
+
+This is the supply measure: new dwelling units consented in a year, divided by the resident population, for each of the 67 territorial authorities and the country. It is the candidate alternative response for RQ1 (supply rather than cost), the obvious "market heat" feature, and the only place the release brings population in. The file is small, so it is read without caching.
+
+```{r}
+per1000_ta <- read_infoshare(f_per1000_ta)
+kable(profile_infoshare(per1000_ta), caption = "Profile of the per-1,000-residents TA file")
+```
+
+25,382 rows and 68 areas, with `Series_title_2` to `_5` empty: the series is defined by area alone. `Status` has two values, and the 816 series are 12 per area — which needs explaining, because the file is called *annual*.
+
+```{r}
+per1000_ta %>%
+  group_by(area = Series_title_1) %>%
+  summarise(series = n_distinct(Series_reference), first_period = min(Period), last_period = max(Period), .groups = "drop") %>%
+  count(series, first_period, last_period, name = "areas") %>%
+  kable(caption = "Series per area and their coverage")
+```
+
+```{r}
+per1000_ta %>%
+  filter(Series_title_1 == "New Zealand") %>%
+  mutate(year_end_month = substr(Period, 6, 7)) %>%
+  group_by(Series_reference) %>%
+  summarise(year_end_months = paste(sort(unique(year_end_month)), collapse = ", "),
+            first_period = min(Period), last_period = max(Period), values = n(), .groups = "drop") %>%
+  kable(caption = "The 12 national series: one per year-end month")
+```
+
+Each of the 12 series per area is an annual series for a different **year-end month**: `BLDA.S300001` holds years ending in January, `BLDA.S300012` years ending in December, and so on. Put together they give a rolling 12-month value at every month, so `Period = 2026.08` means the year ending August 2026. The national series starts with the year ending March 1966; the 67 TAs start with the year ending January 1996 and run to August 2026.
+
+```{r}
+per1000_ta %>%
+  filter(Status == "P") %>%
+  mutate(level = if_else(Series_title_1 == "New Zealand", "New Zealand", "Territorial authorities")) %>%
+  group_by(level) %>%
+  summarise(first_period = min(Period), last_period = max(Period), rows = n(), areas = n_distinct(Series_title_1), .groups = "drop") %>%
+  kable(caption = "Provisional (P) values")
+```
+
+The provisional flag covers the TA values for years ending January 2024 onwards (32 per district) and the national values from the year ending January 2025. Those will be revised when Stats NZ updates the population estimates underneath them. The release notes say the population figures are the 2023-base subnational estimates.
+
+```{r}
+per1000_ta %>%
+  filter(Series_title_1 == "New Zealand") %>%
+  mutate(month = period_to_date(Period)) %>%
+  ggplot(aes(x = month, y = Data_value)) +
+  geom_line(linewidth = 0.8, colour = "#C76B0A") +
+  labs(title = "New homes per 1,000 people: from 13.4 in 1973 to 3.0 in 2011, and 7.7 in the year to August 2026",
+       x = "Year ending", y = "New dwellings consented per 1,000 residents")
+```
+
+The national rate peaked at 13.4 per 1,000 in the year to December 1973, bottomed at 3.0 in the year to July 2011, climbed back to about 9.7 in 2022 and was 7.7 in the year to August 2026. The sixty-year series makes the point that the 1990–2026 window we model is not the whole story — the 1970s building boom is outside it — but the TA breakdown only exists from 1996.
+
+```{r}
+per1000_latest <- per1000_ta %>%
+  filter(Period == max(Period), Series_title_1 != "New Zealand") %>%
+  dplyr::select(area = Series_title_1, per_1000 = Data_value, Status) %>%
+  arrange(desc(per_1000))
+
+bind_rows(slice_head(per1000_latest, n = 5), slice_tail(per1000_latest, n = 5)) %>%
+  kable(caption = "New dwellings per 1,000 residents, year ending August 2026, highest and lowest districts")
+```
+
+```{r, fig.height = 9}
+per1000_latest %>%
+  ggplot(aes(x = per_1000, y = fct_reorder(area, per_1000))) +
+  geom_point(colour = "#C76B0A", size = 2) +
+  labs(title = "Queenstown-Lakes consents five times the national rate of new homes per resident",
+       x = "New dwellings per 1,000 residents, year ending August 2026", y = NULL)
+```
+
+Queenstown-Lakes (38.7 per 1,000) and Selwyn (27.6) are far ahead of everyone else; Mackenzie, Central Otago and Christchurch follow at 12–19. The Chatham Islands consented no new dwellings in the year, and Kawerau, Waitomo, Ōtorohanga (`Otorohanga District` in the file — the Infoshare files carry no macrons) and Ruapehu are below 2. The ordering is nothing like the $/m² ordering in the TA section — Selwyn is the cheapest district per square metre and the second hottest per resident — which is the first hint that cost and supply are different questions and that RQ1 should pick one.
+
+::: boxNote
+Joining this file to a calendar-year table means taking the December series (`Period` ending `.12`) only; joining to the quarterly frame means the series ending in each quarter-end month. Using every row would give each district-year twelve nearly identical values. The TA names here match the TA file exactly, so the join key is `Series_title_1`.
+:::
+
+# New dwellings consented per 1000 residents by region (Annual)
+
+The same measure for the 16 regions and the country, with the same 12-series-per-area structure.
+
+```{r}
+per1000_reg <- read_infoshare(f_per1000_reg)
+kable(profile_infoshare(per1000_reg), caption = "Profile of the per-1,000-residents region file")
+
+per1000_reg %>%
+  group_by(area = Series_title_1) %>%
+  summarise(series = n_distinct(Series_reference), first_period = min(Period), last_period = max(Period), .groups = "drop") %>%
+  count(series, first_period, last_period, name = "areas") %>%
+  kable(caption = "Series per area and their coverage")
+
+per1000_reg %>%
+  filter(Period == max(Period), Series_title_1 != "New Zealand") %>%
+  dplyr::select(region = Series_title_1, per_1000 = Data_value, Status) %>%
+  arrange(desc(per_1000)) %>%
+  kable(caption = "New dwellings per 1,000 residents by region, year ending August 2026")
+```
+
+6,614 rows, 17 areas, 12 series each; the national series from 1966 and the regions from 1996, with provisional values from the year ending January 2024. Canterbury (12.8), Otago (11.8) and Auckland (9.5) lead; Taranaki, Gisborne and Marlborough are under 4. Regions average over their districts, so the extremes seen at TA level (Queenstown-Lakes inside Otago, Selwyn inside Canterbury) are diluted here. Not used directly, but it is the file to cite for a regional comparison on the poster.
+
+# New dwellings consented per 1000 residents by Auckland local board (Annual)
+
+```{r}
+per1000_akl <- read_infoshare(f_per1000_akl)
+kable(profile_infoshare(per1000_akl), caption = "Profile of the per-1,000-residents Auckland local board file")
+
+per1000_akl %>%
+  filter(Period == max(Period)) %>%
+  dplyr::select(board = Series_title_1, per_1000 = Data_value, Status) %>%
+  arrange(desc(per_1000)) %>%
+  kable(caption = "New dwellings per 1,000 residents by Auckland local board, year ending August 2026")
+```
+
+7,728 rows: 21 boards × 368 periods (one value per board-month, spread across the 12 year-end-month series) from the year ending January 1996, provisional from January 2024. Franklin (14.3), Maungakiekie-Tamaki (13.7) and Papakura (13.6) are building fastest per resident; Waitemata (1.3), Great Barrier (1.6) and Waitakere Ranges (3.0) slowest. If the cleaning document chooses to model Auckland's boards as districts, this file supplies their per-capita rate, so the option is complete.
+
+# Non-residential outliers
+
+A small reference file: the monthly value of very large non-residential consents, which Stats NZ removes before estimating the non-residential trend because a single hospital or stadium consent can move a month on its own. There is no geography.
+
+```{r}
+outliers <- read_infoshare(f_outliers)
+kable(profile_infoshare(outliers), caption = "Profile of the non-residential outliers file")
+
+outliers %>%
+  group_by(Series_reference, Group, Series_title_1, Series_title_2, Units) %>%
+  summarise(first_period = min(Period), last_period = max(Period), months = n(),
+            months_with_a_consent = sum(Data_value > 0),
+            largest_month_millions = max(Data_value) / 1e6, .groups = "drop") %>%
+  kable(digits = 0, caption = "The three series")
+```
+
+Three series. Two — consents of $25 million and over, and $50 million and over — were discontinued in October 2017 and have `Units = value` in lower case, a labelling inconsistency to be aware of. The current series, `BLDM.SXC`, is consents of **$100 million and above** from January 2006; it is non-zero in 30 of its 248 months, the largest being about $352 million in September 2025.
+
+```{r}
+outliers %>%
+  filter(Series_reference == "BLDM.SXC") %>%
+  mutate(month = period_to_date(Period)) %>%
+  ggplot(aes(x = month, y = Data_value / 1e6)) +
+  geom_col(fill = "#C76B0A") +
+  labs(title = "$100m+ non-residential consents: 30 months in 20 years, most of them since 2015",
+       x = NULL, y = "Value consented in the month ($ million)")
+```
+
+The relevance to us is indirect. These consents sit inside the non-residential value in the TA file, where a single one can double a district's non-residential total for the quarter. If non-residential activity becomes a feature in RQ1, this file says which months to inspect for such spikes, though not which district they fell in.
+
+# NZ percentage change (Monthly)
+
+The last file in the main zip holds three derived series: the percentage change in national new dwelling consents from the same month a year earlier (actual), and the month-on-month percentage change in the seasonally adjusted dwelling and house series.
+
+```{r}
+pctchange <- read_infoshare(f_pctchange)
+kable(profile_infoshare(pctchange), caption = "Profile of the NZ percentage change file")
+
+pctchange %>%
+  group_by(Series_reference, Series_title_1, Series_title_2, Series_title_3, Status) %>%
+  summarise(first_period = min(Period), last_period = max(Period), months = n(),
+            min_pct = min(Data_value), max_pct = max(Data_value), .groups = "drop") %>%
+  kable(digits = 1, caption = "The three series")
+```
+
+1,483 rows. The year-on-year series runs from April 1966 and is final; the two seasonally adjusted series run from February 1995 and are `R` throughout, because the seasonal adjustment they derive from is re-estimated monthly. The year-on-year change ranges from −58% to +84%, which is the scale of swing in monthly national consents.
+
+Everything here can be recomputed from the regional file, so the file is a convenience rather than a source. Its only use for us is as a check: the cleaning document can confirm that the year-on-year change it computes from the TA file's national row matches `BLDM.STTZ1100A1AAC`.
+
+# New dwellings consented by 2026 statistical area 2 (Monthly)
+
+The second zip holds the finest geography in the release: monthly counts of new dwellings for 2,396 statistical areas (SA2s — neighbourhoods of a few thousand people), by dwelling type, from April 1990. It is a different shape from everything above — a tidy wide table with one row per SA2 per month — and it holds **counts only**: no value, no floor area. It is the basis of the optional RQ4 (where will new homes be built) and the finest level at which RQ2's district profiles could be built.
+
+```{r load-sa2, cache = TRUE}
+sa2_cols <- cols(
+  month                        = col_date(),
+  SA2_code                     = col_character(),   # an identifier, kept as text
+  SA2_name                     = col_character(),
+  territorial_authority        = col_character(),
+  total_dwelling_units         = col_integer(),
+  houses                       = col_integer(),
+  apartments                   = col_integer(),
+  retirement_village_units     = col_integer(),
+  townhouses_flats_units_other = col_integer()
+)
+
+df_sa2 <- read_csv(file.path(data_root, f_sa2_2026), col_types = sa2_cols, progress = FALSE)
+```
+
+```{r}
+tibble(rows           = nrow(df_sa2),
+       sa2s           = n_distinct(df_sa2$SA2_code),
+       tas            = n_distinct(df_sa2$territorial_authority),
+       first_month    = min(df_sa2$month),
+       last_month     = max(df_sa2$month),
+       months         = n_distinct(df_sa2$month),
+       rows_per_sa2   = paste(unique(count(df_sa2, SA2_code)$n), collapse = ", "),
+       missing_values = sum(is.na(df_sa2))) %>%
+  mutate(across(everything(), as.character)) %>%
+  pivot_longer(everything(), names_to = "item", values_to = "value") %>%
+  kable(caption = "Profile of the 2026 SA2 file")
+```
+
+1,047,052 rows = 2,396 SA2s × 437 months, every SA2 present in every month, no missing values. `month` is a proper date (`YYYY-MM-01`) rather than the `YYYY.MM` text of the Infoshare files. A random sample of rows shows the layout:
+
+```{r}
+df_sa2 %>%
+  slice_sample(n = 6) %>%
+  arrange(month) %>%
+  kable(caption = "Six random SA2-months")
+```
+
+## Zero inflation
+
+The first thing to know about this table is how many of its rows are zero.
+
+```{r}
+df_sa2 %>%
+  summarise(sa2_months = n(),
+            share_zero = mean(total_dwelling_units == 0),
+            share_parts_equal_total = mean(houses + apartments + retirement_village_units +
+                                             townhouses_flats_units_other == total_dwelling_units),
+            max_in_one_sa2_month = max(total_dwelling_units),
+            total_dwellings = sum(total_dwelling_units)) %>%
+  mutate(across(everything(), as.character)) %>%
+  pivot_longer(everything(), names_to = "item", values_to = "value") %>%
+  kable()
+```
+
+```{r}
+df_sa2 %>%
+  mutate(bucket = cut(total_dwelling_units,
+                      breaks = c(-1, 0, 1, 2, 5, 10, 20, 50, Inf),
+                      labels = c("0", "1", "2", "3–5", "6–10", "11–20", "21–50", "51+"))) %>%
+  count(bucket, name = "sa2_months") %>%
+  mutate(share = sa2_months / sum(sa2_months)) %>%
+  kable(digits = 4, format.args = list(big.mark = ","), caption = "New dwellings per SA2-month")
+```
+
+Two-thirds (67.1%) of SA2-months have no new dwelling at all, another 17% have exactly one, and fewer than 1% have more than 20. The four dwelling-type columns sum to the total in every row, so the total is redundant and the parts are reliable. The largest single value is 417 dwellings in one SA2 in one month:
+
+```{r}
+df_sa2 %>%
+  slice_max(total_dwelling_units, n = 3, with_ties = FALSE) %>%
+  kable(caption = "The three largest SA2-months")
+```
+
+All three are central Auckland SA2s in 2003–2004, the peak of the inner-city apartment boom — a single consent for a tower counts every unit in it. That is the multi-unit lumpiness the release notes warn about, at its most extreme.
+
+```{r}
+df_sa2 %>%
+  mutate(year = as.integer(format(month, "%Y"))) %>%
+  filter(year >= 1991, year <= 2025) %>%
+  group_by(year) %>%
+  summarise(share_zero = mean(total_dwelling_units == 0), .groups = "drop") %>%
+  ggplot(aes(x = year, y = share_zero)) +
+  geom_line(linewidth = 0.8, colour = "#C76B0A") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "The share of empty SA2-months tracks the cycle: 76% in 2011, 60% in 2021",
+       x = "Year", y = "SA2-months with no new dwelling")
+```
+
+The zero share moves with the national cycle — highest in the 2011 trough, lowest in the 2021 boom — but never drops below 60%. Any model at SA2-month level is a model of mostly zeros. RQ4, if it is attempted, needs either a coarser time unit (SA2-year), a hurdle or zero-inflated model, or a classification of any-versus-none, and the pitch said as much.
+
+```{r}
+df_sa2 %>%
+  group_by(SA2_code, SA2_name, territorial_authority) %>%
+  summarise(dwellings_1990_2026 = sum(total_dwelling_units), .groups = "drop") %>%
+  summarise(sa2s = n(),
+            never_consented_a_dwelling = sum(dwellings_1990_2026 == 0),
+            share_never = mean(dwellings_1990_2026 == 0),
+            median_over_36_years = median(dwellings_1990_2026),
+            max_over_36_years = max(dwellings_1990_2026)) %>%
+  kable(digits = 3, caption = "Dwellings per SA2 over the whole period")
+```
+
+About 4% of SA2s never consented a dwelling in 36 years — oceanic, inlet and industrial areas that exist in the classification but hold no housing. They can be dropped from any SA2-level model without loss.
+
+## How SA2s sit inside districts
+
+```{r}
+df_sa2 %>%
+  distinct(territorial_authority, SA2_code) %>%
+  count(territorial_authority, name = "sa2s") %>%
+  arrange(desc(sa2s)) %>%
+  dplyr::slice(c(1:5, (n() - 4):n())) %>%
+  kable(caption = "SA2s per territorial authority: the five largest and five smallest")
+```
+
+Auckland has 633 SA2s, Christchurch 179, Wellington 86; the Chatham Islands and Kaikoura have two each. If RQ2 clustered SA2s instead of districts, Auckland would be a quarter of the sample on its own.
+
+Because the file names the parent TA, it should roll up to the TA file. It does — but only after a spelling difference is fixed:
+
+```{r}
+sa2_rollup <- df_sa2 %>%
+  group_by(territorial_authority, month) %>%
+  summarise(across(c(total_dwelling_units, houses, apartments,
+                     retirement_village_units, townhouses_flats_units_other), sum),
+            .groups = "drop")
+
+# TA names in the SA2 file that do not appear in the TA file
+sa2_rollup %>%
+  distinct(territorial_authority) %>%
+  anti_join(distinct(ta_month_dwellings, area), by = c("territorial_authority" = "area")) %>%
+  kable(caption = "SA2-file TA names with no match in the TA file")
+```
+
+The SA2 file writes Ōpōtiki and Ōtorohanga with macrons; the Infoshare files write them without. A join on the name silently drops both districts. Stripping diacritics from the SA2 names fixes it, and is safer than a two-name recode because any future release could add macrons elsewhere.
+
+```{r}
+sa2_rollup <- sa2_rollup %>%
+  mutate(area = stringi::stri_trans_general(territorial_authority, "Latin-ASCII"))
+
+sa2_rollup %>%
+  inner_join(ta_month_dwellings, by = c("area", "month")) %>%
+  summarise(ta_months = n(),
+            diff_dwelling_units = max(abs(total_dwelling_units - `Dwelling units`)),
+            diff_houses = max(abs(houses - Houses)),
+            diff_apartments = max(abs(apartments - Apartments)),
+            diff_retirement_village_units = max(abs(retirement_village_units - `Retirement village units`)),
+            diff_townhouses_flats_units_other =
+              max(abs(townhouses_flats_units_other - `Townhouses, flats, units, and other dwellings`))) %>%
+  pivot_longer(-ta_months, names_to = "dwelling_type", names_prefix = "diff_", values_to = "max_abs_difference") %>%
+  kable(caption = "SA2 file summed to TA × month vs the TA file, new dwellings")
+```
+
+All 29,716 TA-months match exactly for every dwelling type: the SA2 counts are the TA counts, disaggregated. That means the two files can be mixed freely — SA2 counts for geography, TA values and floor areas for cost — and that the SA2 file can supply a within-district concentration feature for RQ1 (how much of a district's building happens in its busiest few SA2s) without any reconciliation.
+
+::: boxNote
+`SA2_code` is kept as character. The codes are six digits and happen to have no leading zeros, but they are identifiers, and treating them as numbers invites accidental arithmetic. The same applies to the TA codes embedded in `Series_reference`.
+:::
+
+# New dwellings consented by 2023 statistical area 2 (Monthly)
+
+The same table on the 2023 SA2 boundaries. Stats NZ publishes both so that users can join to the 2023 Census (2023 boundaries) or to current geographies (2026). We need to know how different they are.
+
+```{r load-sa2-2023, cache = TRUE, dependson = "load-sa2"}
+df_sa2_2023 <- read_csv(file.path(data_root, f_sa2_2023), col_types = sa2_cols, progress = FALSE)
+
+sa2_2023_summary <- tibble(rows = nrow(df_sa2_2023),
+                           sa2s = n_distinct(df_sa2_2023$SA2_code),
+                           tas = n_distinct(df_sa2_2023$territorial_authority),
+                           first_month = min(df_sa2_2023$month),
+                           last_month = max(df_sa2_2023$month),
+                           total_dwellings = sum(df_sa2_2023$total_dwelling_units)) %>%
+  mutate(across(everything(), as.character)) %>%
+  pivot_longer(everything(), names_to = "item", values_to = "value")
+
+codes_2026 <- distinct(df_sa2, SA2_code, SA2_name, territorial_authority)
+codes_2023 <- distinct(df_sa2_2023, SA2_code, SA2_name, territorial_authority)
+sa2_only_2026 <- anti_join(codes_2026, codes_2023, by = "SA2_code")
+sa2_only_2023 <- anti_join(codes_2023, codes_2026, by = "SA2_code")
+sa2_renamed <- inner_join(codes_2023, codes_2026, by = "SA2_code", suffix = c("_2023", "_2026")) %>%
+  filter(SA2_name_2023 != SA2_name_2026)
+
+# do the two versions give the same district totals?
+sa2_version_check <- df_sa2_2023 %>%
+  group_by(territorial_authority, month) %>%
+  summarise(total_2023 = sum(total_dwelling_units), .groups = "drop") %>%
+  inner_join(df_sa2 %>%
+               group_by(territorial_authority, month) %>%
+               summarise(total_2026 = sum(total_dwelling_units), .groups = "drop"),
+             by = c("territorial_authority", "month")) %>%
+  mutate(difference = total_2026 - total_2023)
+
+rm(df_sa2_2023)
+```
+
+```{r}
+kable(sa2_2023_summary, caption = "Profile of the 2023 SA2 file")
+kable(sa2_only_2026, caption = "SA2 codes only in the 2026 file")
+kable(sa2_only_2023, caption = "SA2 codes only in the 2023 file")
+cat("SA2 codes present in both files but with different names:", nrow(sa2_renamed), "\n")
+```
+
+The two files differ by one boundary change: in the 2023 geography SA2 `363700` (Oceanic Southland Region) covers the waters off Southland; in 2026 it is split into `363701` (the same name, still outside any TA) and `363702` (Inlets Stewart Island/Rakiura, assigned to Southland District). Every other code and name is identical, and both files hold 973,538 dwellings in total.
+
+```{r}
+sa2_version_check %>%
+  summarise(ta_months = n(),
+            share_identical = mean(difference == 0),
+            max_abs_difference = max(abs(difference))) %>%
+  kable(digits = 4, caption = "District × month totals, 2026 boundaries vs 2023 boundaries")
+
+sa2_version_check %>%
+  filter(difference != 0) %>%
+  kable(caption = "The TA-months that differ")
+```
+
+District totals are identical in all but six TA-months, where a single dwelling moves between Kawerau and Whakatāne — a small boundary adjustment between the two versions. For our purposes the files are interchangeable at district level; we use the **2026** file unless a join to 2023 Census data is needed, and the cleaning document records that choice.
+
+# The release tables workbook
+
+The third download is not data for modelling but documentation: the Excel workbook of published tables (tables 1–9) with the footnotes that define the series. It lives in OneDrive beside the zips, in `04_Analysis/data-local-only/StatsNZ_Aug2026/`, so the path here is relative to this document's folder.
+
+```{r}
+xlsx_path <- "../data-local-only/StatsNZ_Aug2026/building-consents-issued-august-2026.xlsx"
+
+if (file.exists(xlsx_path) && requireNamespace("readxl", quietly = TRUE)) {
+  readxl::excel_sheets(xlsx_path)
+} else {
+  cat("Workbook not found at", xlsx_path, "(knit from 04_Analysis/R/ with the pinned release in place)\n")
+}
+```
+
+The footnotes are the source for the definitions used throughout this document and the pitch:
+
+- values are **GST inclusive and not inflation adjusted**;
+- consents valued **under $5,000 are excluded**, as are consents mainly for demolition;
+- for **staged consents**, the value is recorded at each stage but floor area and dwelling counts at the largest stage, so value ÷ floor area can spike in individual months;
+- **floor areas are imputed** when a consent does not state one;
+- each dwelling in a multi-unit project is **counted separately**;
+- seasonally adjusted and trend series are **revised every month**; the non-residential trend excludes consents of $100 million and over (the outliers file above);
+- the per-1,000-residents series use the **2023-base subnational population estimates**.
+
+# The price index for deflating dollars
+
+Every dollar value in the release is nominal, and the national $/m² series rose 4.7× between 1991 and 2025 largely because of inflation. To compare costs across years the values have to be deflated, and the right deflator for consented building work is Stats NZ's Capital Goods Price Index for residential buildings (series `CEPQ.S61101`, quarterly, base September 2022 = 1000), from the *Business price indexes* release. It is a separate download, so this section runs only if a file whose name contains "price" is in `data_root` and has the Infoshare columns; otherwise it reports that and moves on.
+
+```{r}
+cgpi_files <- list.files(data_root, pattern = "price", ignore.case = TRUE, full.names = TRUE)
+cgpi_ok <- length(cgpi_files) == 1 &&
+  all(c("Series_reference", "Period", "Data_value") %in%
+        names(read_csv(cgpi_files[1], n_max = 0, col_types = cols(.default = col_character()), progress = FALSE)))
+cat("Price index file found:", cgpi_ok, "\n")
+if (length(cgpi_files) > 0) print(basename(cgpi_files))
+```
+
+```{r, eval = cgpi_ok}
+cgpi <- read_csv(cgpi_files[1], col_types = cols(.default = col_character()), progress = FALSE) %>%
+  filter(Series_reference == "CEPQ.S61101") %>%
+  transmute(Period, index = as.numeric(Data_value), Status)
+
+cat("Quarters:", nrow(cgpi), " from", min(cgpi$Period), "to", max(cgpi$Period), "\n")
+```
+
+```{r, eval = cgpi_ok}
+# annual average of the quarterly index, and the latest quarter as the base
+cgpi_annual <- cgpi %>%
+  mutate(year = as.integer(substr(Period, 1, 4))) %>%
+  group_by(year) %>%
+  summarise(index = mean(index), quarters = n(), .groups = "drop") %>%
+  filter(quarters == 4)
+
+base_index <- cgpi %>% filter(Period == max(Period)) %>% pull(index)
+
+nz_houses_real <- nz_houses %>%
+  inner_join(cgpi_annual, by = "year") %>%
+  mutate(real_dollars_per_m2 = dollars_per_m2 * base_index / index)
+
+nz_houses_real %>%
+  filter(year %in% c(1991, 2005, 2010, 2023, 2025)) %>%
+  dplyr::select(year, houses, dollars_per_m2, index, real_dollars_per_m2) %>%
+  mutate(year = as.character(year)) %>%
+  kable(digits = 0, format.args = list(big.mark = ","),
+        caption = paste0("New houses: nominal vs real $/m² (in dollars of ", max(cgpi$Period), ")"))
+```
+
+```{r, eval = cgpi_ok}
+nz_houses_real %>%
+  dplyr::select(year, dollars_per_m2, real_dollars_per_m2) %>%   # drop `value` first: it would clash with values_to
+  pivot_longer(-year, names_to = "basis", values_to = "y") %>%
+  mutate(basis = if_else(basis == "dollars_per_m2", "Nominal", paste0("Real (", max(cgpi$Period), " dollars)"))) %>%
+  ggplot(aes(x = year, y = y, colour = basis)) +
+  geom_line(linewidth = 1) +
+  scale_y_continuous(labels = scales::dollar) +
+  labs(title = "Deflated, the cost of a square metre of new house has risen by about a seventh since 1991",
+       x = "Year consented", y = "$/m², new houses", colour = NULL) +
+  theme(legend.position = "top")
+```
+
+In the pitch profiling (done in Python on the same release) the real series went from about $2,900/m² in 1991 to about $3,300 in 2025 in June-2026 dollars, an increase of roughly 14% against the nominal 4.7×. The chunks above reproduce that in R once the index file is in place; the exact figures depend on whether the quarterly index is averaged to years (as here) or applied quarter by quarter, which the cleaning document should fix one way.
+
+::: boxNote
+Decision recorded for RQ1: the response is **real** $/m², deflated by `CEPQ.S61101` to the latest quarter's dollars. The index is quarterly and uses the quarter-end month in `Period` (`2026.06` = June 2026 quarter), so it joins to the district-quarter frame directly. The index file is downloaded separately from the consents release and must be pinned too — the June 2026 quarter release.
+:::
+
+# What this means for the cleaning pipeline
+
+The decisions this analysis settles, or leaves to the cleaning document, in the order the pipeline will meet them:
+
+1. **Read `Period` as text** in every Infoshare file, converting with `period_to_date()` where a date is needed. Quarterly files write a quarter as its last month.
+2. **One release, one deflator.** The consents release is pinned to August 2026 and the price index to the June 2026 quarter; both are `R`-status series in places and would shift under a newer release.
+3. **Pick one level of the hierarchy.** For dwellings: `Dwelling units` for totals, `Houses` for the $/m² response, the three multi-unit types for the type mix. Never sum across levels. The identities hold to within 1 at district level, so the level can be chosen freely.
+4. **Work in district-quarters for RQ1** (9,715 rows, 1990-Q2 to 2026-Q2), dropping the partial 2026-Q3, with a **minimum house count** per row still to be set — five houses leaves 8,662 rows but keeps the Ōpōtiki-style tails; ten would be safer; pooling the ten smallest districts to years is the alternative.
+5. **Deflate** `Value` before computing $/m², and model **log** real $/m² to tame the right tail.
+6. **Derive the type mix, size and per-capita features before the split**, from `ta_month_dwellings`-style tables, the per-1,000 December series, and (optionally) SA2 concentration. Keep value-based features off the right-hand side when the response is value-based, to avoid leakage.
+7. **Auckland**: decide between one TA, 21 boards, or per-capita scaling. The local board file supports the second; this document makes no choice.
+8. **Join keys**: TA names match exactly between the Infoshare files; strip macrons from the SA2 file's `territorial_authority` before joining. SA2 codes are text. Use the 2026 SA2 boundaries.
+9. **Validation is time-ordered** for RQ1 and RQ3 (train to 2019, test 2020–2026, as pitched) because districts move together within a year; a random split leaks the national cycle. RQ3's 52 tied district-years need a rule.
+10. **Filter the regional files to `Series_title_5 == "Actual"`** unless the seasonally adjusted or trend series is wanted deliberately, and say so if it is, since those are revised monthly.
+11. **Not used, but understood**: the sector, control, outlier and percentage-change files are national-only and serve as context or checks, not as sources.
+
+*End of document*
