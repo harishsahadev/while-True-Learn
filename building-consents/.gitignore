@@ -1,0 +1,23 @@
+# R / RStudio
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+.DS_Store
+
+# knitr caches and figure folders (recreated when a notebook is knitted)
+*_cache/
+*_files/
+
+# raw data: too large for GitHub (1.5 GB); see data/raw/README.md to download it
+data/raw/*
+!data/raw/README.md
+
+# personal notes, pitch material and early exploration (not part of the project)
+my_notes/
+extra/
+building-consents-analysis.Rmd
+building-consents-analysis.html
+
+# Office lock files
+~$*

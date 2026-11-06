@@ -1,0 +1,717 @@
+---
+title: "RQ1 Step 1: Data understanding, cleaning and the processed dataset"
+subtitle: "What drives the real cost per m² of new houses across districts?"
+author: "while True: learn(), Group 8, STAT462"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: show
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE,
+                      fig.align = "center", out.width = "85%")
+
+# Find the project root (the folder holding the .Rproj file), so this
+# notebook knits the same way from RStudio or the command line.
+find_proj_root <- function(path = getwd()) {
+  path <- normalizePath(path)
+  repeat {
+    if (length(list.files(path, pattern = "\\.Rproj$"))) return(path)
+    parent <- dirname(path)
+    if (parent == path) stop("No .Rproj file found above ", getwd())
+    path <- parent
+  }
+}
+proj_root <- find_proj_root()
+knitr::opts_knit$set(root.dir = proj_root)
+```
+
+```{r load-helpers}
+source(file.path(proj_root, "R", "utils_data.R"))
+library(knitr)
+
+# ---- Settings for this notebook (change here, not further down) ------------
+MIN_HOUSES   <- 5        # minimum new houses for a district-quarter to be modelled
+TRAIN_LAST_Y <- 2019     # train = up to 2019Q4, test = 2020Q1 onwards (as pitched)
+BASE_YQ      <- c(2026L, 2L)   # express real dollars in June-2026-quarter dollars
+```
+
+# What this notebook does
+
+**Research question 1 (slide 6 of the pitch):** *What drives the real cost per m² of new houses across districts?*
+Models are trained on district-quarters up to 2019 and tested on 2020–2026 (Step 3).
+
+Before modelling we need a single, clean, **model-ready table** with:
+
+* **One row per district × quarter** (67 territorial authorities, 1990Q2–2026Q2).
+* **The response**: the *real* consented value per m² of new houses, so that a 1995 quarter and a 2025
+  quarter are measured in the same dollars.
+* **Candidate drivers** (features) built from the consents data and placed alongside it.
+* **Flags** for the train/test split and for rows too small to trust.
+
+This notebook builds that table in nine steps, checking each one, and saves it to `data/processed/`.
+Every later RQ1 notebook (EDA, models) starts from the saved file instead of from the 757 MB raw CSV.
+
+# Which data do we need?
+
+## The 13 files in the consents release
+
+The two Stats NZ zips gave us 13 CSVs. Only some of them matter for RQ1:
+
+| File | Used for RQ1? | Why |
+|---|---|---|
+| Building consents by **territorial authority** (Monthly) | **Yes, main source** | The only file with district-level houses: count, value and floor area. |
+| New dwellings consented **per 1000 residents** by territorial authority (Annual) | **Yes, a feature** | How fast a district is building relative to its population. |
+| Building consents by **region** (Quarterly) | **Yes, a check** | Lets us confirm our district → region mapping adds up. |
+| Building consents by region (Monthly) | No | Same as the quarterly file at a finer grain; no district detail. |
+| Building consents by Auckland local board (Monthly) | Not now | Only needed if we split Auckland into its 21 boards. |
+| Building consents by institutional sector / control (Monthly) | No | National only, no geography. |
+| New dwellings by 2023 / 2026 SA2 (Monthly) | Not now | Dwelling *counts* only: no value or floor area, so no $/m². |
+| Per 1000 residents by region / Auckland local board | No | Region or board level only. |
+| Non-residential outliers, NZ percentage change | No | National series. |
+
+## Data from outside the release
+
+Consent values are **nominal** (in the dollars of the day) and **include GST**. To get a *real* cost we need
+a price index for building work. Stats NZ publishes one in a separate release:
+
+* **Capital Goods Price Index (CGPI)**, *Business price indexes: June 2026 quarter*, quarterly,
+  base Sep 2022 quarter = 1000. Downloaded into `data/raw/external/cgpi/` from the Stats NZ release page
+  (CSV zip). Two candidate series:
+  * `CEPQ.S611011A`: **Dwelling units** (closest match to new houses)
+  * `CEPQ.S61101`: Residential buildings (all residential)
+  * We also keep `CEPQ.S61102`, Non-residential buildings, to deflate the non-residential feature.
+
+We also need a **district → region lookup**, which no file provides. We wrote one by hand
+(`data/reference/ta_region_concordance.csv`; districts that cross a regional boundary go to the region
+holding most of their population) and check it against the regional file in section 6.
+
+Nothing else is needed for a first model. Optional extras for later, if time allows: district house-price
+indices, land values, or population estimates.
+
+# Load the territorial authority table
+
+The TA file is long-format (one row per *series × month*), 4.35 million rows.
+We read it with `data.table::fread`, which takes seconds rather than minutes.
+
+```{r load-ta}
+ta_raw <- read_infoshare("Building consents by territorial authority (Monthly).csv",
+                         keep_status = TRUE)
+dim(ta_raw)
+ta_raw |> count(Status, name = "rows") |> kable(caption = "Row status")
+```
+
+**Observation.** `r fmt_int(nrow(ta_raw))` rows; every one has status `F` (final), so none of the
+values we use will be revised in a later release.
+
+## Keep only the series RQ1 needs
+
+There are 26 nested building types × 3 kinds of work × 3 measures. We take just the series we need and
+give each one a short variable name. Because the building types are **nested** (houses are inside
+dwelling units, which are inside residential buildings, …) we never add across them.
+
+```{r series-map}
+series_map <- tribble(
+  ~var,             ~btype,                                          ~work,     ~measure,
+  "houses_n",       "Houses",                                        "New",     "Number",
+  "houses_m2",      "Houses",                                        "New",     "Floor area",
+  "houses_val",     "Houses",                                        "New",     "Value",
+  "dwell_n",        "Dwelling units",                                "New",     "Number",
+  "apt_n",          "Apartments",                                    "New",     "Number",
+  "retire_n",       "Retirement village units",                      "New",     "Number",
+  "town_n",         "Townhouses, flats, units, and other dwellings", "New",     "Number",
+  "resid_new_val",  "Residential buildings",                         "New",     "Value",
+  "resid_alt_val",  "Residential buildings",                         "Altered", "Value",
+  "nonres_new_val", "Non-residential buildings",                     "New",     "Value"
+)
+kable(series_map, caption = "Series taken from the TA file")
+
+ta_month <- ta_raw |>
+  inner_join(series_map, by = c("btype", "work", "measure")) |>
+  select(area, period, var, value) |>
+  pivot_wider(names_from = var, values_from = value)
+
+rm(ta_raw); invisible(gc())
+dim(ta_month)
+```
+
+## Check 1 — is the grid complete?
+
+After pivoting, a missing series would show up as `NA`. We look at the 68 sub-national areas
+(67 TAs + "Area Outside Territorial Authority") from April 1990.
+
+```{r check-grid}
+sub_nat <- ta_month |> filter(area != "New Zealand")
+
+tibble(
+  areas          = n_distinct(sub_nat$area),
+  first_month    = min(sub_nat$period),
+  last_month     = max(sub_nat$period),
+  months         = n_distinct(sub_nat$period),
+  rows           = nrow(sub_nat),
+  expected_rows  = n_distinct(sub_nat$area) * n_distinct(sub_nat$period),
+  missing_values = sum(is.na(sub_nat |> select(-area, -period)))
+) |> kable()
+```
+
+**Observation.** The grid is complete: every area has every month from 1990.04 to 2026.08 and no value is
+missing. Zeros are real zeros (no houses consented that month), not gaps.
+
+## Check 2 — does the building-type hierarchy add up?
+
+Dwelling units should equal houses + apartments + retirement units + townhouses/flats. Stats NZ rounds,
+so we allow a difference of 1.
+
+```{r check-hierarchy}
+sub_nat |>
+  mutate(diff = dwell_n - (houses_n + apt_n + retire_n + town_n)) |>
+  summarise(rows_checked = n(),
+            rows_off_by_more_than_1 = sum(abs(diff) > 1),
+            max_abs_diff = max(abs(diff))) |>
+  kable()
+```
+
+## Check 3 — do districts add up to New Zealand?
+
+```{r check-nz-total}
+sum_check <- sub_nat |>
+  group_by(period) |>
+  summarise(across(c(houses_n, houses_m2, houses_val), sum), .groups = "drop") |>
+  inner_join(ta_month |> filter(area == "New Zealand") |>
+               select(period, nz_n = houses_n, nz_m2 = houses_m2, nz_val = houses_val),
+             by = "period")
+
+sum_check |>
+  summarise(months = n(),
+            count_mismatch = sum(abs(houses_n - nz_n) > 1),
+            m2_mismatch    = sum(abs(houses_m2 - nz_m2) > 1),
+            value_mismatch = sum(abs(houses_val - nz_val) > 1000)) |>
+  kable()
+```
+
+**Observation.** Both checks are exact: dwelling units equal the sum of their four sub-types in every
+district-month, and the districts (plus the area outside any TA) add up to the New Zealand total for count,
+floor area and value in all 437 months. The file is internally consistent, so we can use the house series
+as published without repairing anything.
+
+# Monthly → quarterly district frame
+
+Monthly district figures are noisy: a small district may consent 3 houses one month and none the next.
+Following the pitch, the unit of analysis is the **district-quarter**. We:
+
+1. drop the national total and the "Area Outside Territorial Authority",
+2. sum the three months of each quarter (sums of counts, $ and m², *not* averages of ratios), and
+3. keep only **complete** quarters (all 3 months present), which removes the partial 2026Q3 (Jul–Aug).
+
+```{r build-quarters}
+ta_q <- sub_nat |>
+  filter(area != "Area Outside Territorial Authority") |>
+  mutate(year    = period_year(period),
+         quarter = month_quarter(period_month(period))) |>
+  group_by(ta = area, year, quarter) |>
+  summarise(months = n(),
+            across(all_of(series_map$var), sum),
+            .groups = "drop") |>
+  filter(months == 3) |>
+  select(-months) |>
+  mutate(yq = yq_label(year, quarter), t_index = yq_index(year, quarter)) |>
+  arrange(ta, t_index)
+
+tibble(districts = n_distinct(ta_q$ta),
+       quarters  = n_distinct(ta_q$yq),
+       first     = min(ta_q$yq), last = max(ta_q$yq),
+       rows      = nrow(ta_q)) |> kable(caption = "The district-quarter frame")
+```
+
+**Observation.** `r n_distinct(ta_q$ta)` districts × `r n_distinct(ta_q$yq)` quarters
+= `r fmt_int(nrow(ta_q))` rows, matching the 9,715 in the pitch.
+
+# Add region and island
+
+```{r add-region}
+concord <- read_csv(file.path(paths$reference, "ta_region_concordance.csv"),
+                    show_col_types = FALSE)
+
+# every TA in the data must be in the lookup, and vice versa
+stopifnot(setequal(concord$ta, unique(ta_q$ta)))
+
+ta_q <- ta_q |> left_join(concord, by = "ta")
+concord |> count(region, name = "districts") |> arrange(desc(districts)) |> kable()
+```
+
+## Check 4 — do our district sums reproduce the regional file?
+
+The regional quarterly file is compiled from the *true* geography of each consent, so a district that
+straddles a regional boundary (e.g. Taupō, Waitaki, Tararua, Rangitīkei) will create small differences.
+Large differences would mean a district is in the wrong region.
+
+```{r check-region}
+reg_q <- read_infoshare("Building consents by region (Quarterly).csv") |>
+  filter(btype == "Houses", work == "New", measure == "Number", adjust == "Actual") |>
+  transmute(region = area,
+            year = period_year(period),
+            quarter = month_quarter(period_month(period)),
+            reg_houses_n = value)
+
+region_check <- ta_q |>
+  group_by(region, year, quarter) |>
+  summarise(our_houses_n = sum(houses_n), .groups = "drop") |>
+  inner_join(reg_q, by = c("region", "year", "quarter")) |>
+  group_by(region) |>
+  summarise(quarters       = n(),
+            our_total      = sum(our_houses_n),
+            file_total     = sum(reg_houses_n),
+            pct_difference = 100 * (our_total - file_total) / file_total,
+            .groups = "drop") |>
+  arrange(desc(abs(pct_difference)))
+
+save_tab(region_check, "t01_region_check") |> kable(digits = 2,
+  caption = "New houses 1990-2026: sum of our districts vs the regional file")
+```
+
+**Observation.** All `r nrow(region_check)` regions match (the Chatham Islands sit outside any region).
+Nine regions match exactly and the largest difference is
+`r round(max(abs(region_check$pct_difference)), 1)`% (Otago, which receives part of Waitaki's houses from
+Canterbury in the true geography). The lookup is correct; the small differences are the boundary-straddling
+districts and do not matter for a grouping feature.
+
+# From nominal to real $/m²
+
+## The price index
+
+```{r load-cgpi}
+cgpi <- fread(file.path(paths$raw_cgpi, "business-price-indexes-june-2026-csv.csv"),
+              select = c("Series_reference", "Period", "Data_value"),
+              colClasses = list(character = "Period")) |>
+  as_tibble() |>
+  filter(Series_reference %in% c("CEPQ.S611011A", "CEPQ.S61101", "CEPQ.S61102")) |>
+  mutate(year = period_year(Period), quarter = month_quarter(period_month(Period))) |>
+  select(series = Series_reference, year, quarter, index = Data_value) |>
+  pivot_wider(names_from = series, values_from = index) |>
+  rename(cgpi_dwell = `CEPQ.S611011A`, cgpi_resid = `CEPQ.S61101`,
+         cgpi_nonres = `CEPQ.S61102`) |>
+  arrange(year, quarter)
+
+# one row per quarter, and our whole frame is covered
+stopifnot(!anyDuplicated(cgpi[c("year", "quarter")]))
+missing_q <- anti_join(distinct(ta_q, year, quarter), drop_na(cgpi), by = c("year", "quarter"))
+nrow(missing_q)   # should be 0
+```
+
+```{r cgpi-plot, fig.height = 3.8}
+base <- cgpi |> filter(year == BASE_YQ[1], quarter == BASE_YQ[2])
+
+p_cgpi <- cgpi |>
+  filter(year >= 1990) |>
+  mutate(date = year + (quarter - 1) / 4,
+         `Dwelling units (S611011A)`        = cgpi_dwell / base$cgpi_dwell,
+         `All residential (S61101)`         = cgpi_resid / base$cgpi_resid) |>
+  pivot_longer(c(`Dwelling units (S611011A)`, `All residential (S61101)`),
+               names_to = "series", values_to = "index") |>
+  ggplot(aes(date, index, colour = series)) +
+  geom_line(linewidth = 0.8) +
+  scale_colour_manual(values = c("#2a6f97", "#e07a1f")) +
+  labs(title = "Building costs have roughly quadrupled since 1990",
+       subtitle = "Capital Goods Price Index, rescaled so June 2026 quarter = 1",
+       x = NULL, y = "Index (2026Q2 = 1)", colour = NULL) +
+  theme(legend.position = "top")
+save_fig(p_cgpi, "fig01_cgpi")
+
+cor(cgpi$cgpi_dwell, cgpi$cgpi_resid, use = "complete.obs")
+```
+
+**Decision.** We use **Dwelling units** (`CEPQ.S611011A`), because it prices the type of building
+in our response. The two series are almost identical, so this choice will barely change the results.
+
+## GST
+
+Consent values **include GST**, and GST rose from **12.5% to 15% on 1 October 2010**. Without a correction,
+every district's $/m² jumps by 1.15 / 1.125 = **+2.2%** in 2010Q4 for a purely tax reason.
+We therefore:
+
+1. remove the GST of the day: `value / (1 + GST rate at the time)`,
+2. deflate with the CGPI to June-2026-quarter prices, and
+3. add back today's 15% GST, so the numbers stay comparable to the GST-inclusive figures in the pitch.
+
+$$
+\text{real\_cost\_m2} = \frac{\text{value}}{\text{floor area}} \times \frac{1}{1+\text{GST}_t} \times \frac{\text{CGPI}_{2026Q2}}{\text{CGPI}_t} \times 1.15
+$$
+
+```{r real-values}
+ta_q <- ta_q |>
+  left_join(cgpi, by = c("year", "quarter")) |>
+  mutate(
+    gst          = gst_rate(year, quarter),
+    real_factor  = (1.15 / (1 + gst)) * (base$cgpi_dwell / cgpi_dwell),
+    nominal_cost_m2 = if_else(houses_m2 > 0, houses_val / houses_m2, NA_real_),
+    real_cost_m2    = nominal_cost_m2 * real_factor,
+    # real values of the other $ series (non-residential uses its own index)
+    resid_alt_val_real  = resid_alt_val  * real_factor,
+    nonres_new_val_real = nonres_new_val * (1.15 / (1 + gst)) * (base$cgpi_nonres / cgpi_nonres)
+  )
+```
+
+## Sanity check against the pitch
+
+The pitch said national new-house $/m² went up ×4.7 in nominal terms between 1991 and 2025, but only
+about +14% in real terms. We recompute the national series from our districts.
+
+```{r national-series}
+nz_year <- ta_q |>
+  group_by(year) |>
+  filter(n_distinct(quarter) == 4) |>
+  summarise(nominal = sum(houses_val) / sum(houses_m2),
+            real    = sum(houses_val * real_factor) / sum(houses_m2),
+            houses  = sum(houses_n),
+            avg_m2  = sum(houses_m2) / sum(houses_n), .groups = "drop")
+invisible(save_tab(nz_year, "t02_nz_annual_cost_m2"))
+
+nz_year |> filter(year %in% c(1991, 2000, 2010, 2019, 2025)) |>
+  mutate(year = as.character(year)) |>
+  kable(digits = 0, format.args = list(big.mark = ","),
+        caption = "New Zealand new houses: $/m² (real = June-2026 dollars, GST 15%)")
+
+p_nz <- nz_year |>
+  pivot_longer(c(nominal, real), names_to = "basis", values_to = "cost_m2") |>
+  ggplot(aes(year, cost_m2, colour = basis)) +
+  geom_line(linewidth = 0.9) +
+  scale_colour_manual(values = c(nominal = "#9aa5b1", real = "#2a6f97"),
+                      labels = c("Nominal", "Real (June 2026 $)")) +
+  scale_y_continuous(labels = scales::dollar) +
+  labs(title = "Once inflation is removed, the cost of a square metre has moved far less",
+       subtitle = "Consented value per m² of new houses, New Zealand",
+       x = NULL, y = "$ per m²", colour = NULL) +
+  theme(legend.position = "top")
+save_fig(p_nz, "fig02_nz_nominal_vs_real")
+```
+
+**Observation.** Nominal growth 1991→2025: ×`r round(with(nz_year, nominal[year==2025]/nominal[year==1991]), 2)`.
+Real growth: `r fmt_pct(with(nz_year, real[year==2025]/real[year==1991]) - 1)`.
+Most of the headline increase is general building-cost inflation.
+In real terms the cost per m² fell slightly through the early 1990s, then rose fairly steadily from 1996 to
+about 2019 and has been roughly flat since.
+
+The pitch quoted +14% real growth; we get a bit more because we (a) use the *dwelling-unit* index rather
+than all-residential, (b) deflate quarter by quarter rather than by annual averages, and (c) remove the 2010
+GST step, which lowers early-year values relative to recent ones. The conclusion is the same: **the
+4.7× nominal rise is almost all inflation**. What is left over (the real level, and especially how it differs
+**between districts**) is what RQ1 tries to explain. The +14% quoted on slide 6 of our pitch becomes about +20%
+under this method.
+
+# Features: candidate drivers of cost
+
+Each feature is computed per district-quarter. We avoid any feature built from **house value**, because
+value is the numerator of the response and would leak the answer into the predictors.
+
+| Feature | Meaning | Why it might drive cost |
+|---|---|---|
+| `avg_house_m2` | floor area ÷ number of new houses | Bigger houses spread fixed costs (kitchen, bathrooms, consenting) over more m² |
+| `log_houses_n` | log of new houses consented | Scale: builders in busy markets may be cheaper (or demand pushes prices up) |
+| `multiunit_share` | share of new dwellings that are *not* stand-alone houses | Urban density / land scarcity |
+| `retire_share`, `apt_share` | retirement-village / apartment share of new dwellings | Market type |
+| `dwell_per_1000` | new dwellings in the 12 months to this quarter per 1,000 residents | Building intensity relative to population (from 1996 only) |
+| `houses_yoy` | log change in houses vs the same quarter last year | Demand pressure / boom-bust |
+| `log_resid_alt_real`, `log_nonres_real` | real value of residential alterations / new non-residential work | Overall construction activity competing for builders |
+| `region`, `island`, `is_city`, `ta` | location | Land, transport, labour and climate (e.g. insulation rules) differ by place |
+| `year`, `quarter`, `t_index` | time | Trend and seasonality left after deflating |
+| `real_cost_m2_lag1`, `_lag4` | the district's own cost last quarter / a year ago | Persistence; only for a *forecasting* version of the model |
+
+```{r per1000}
+per1000 <- read_infoshare("New dwellings consented per 1000 residents by territorial authority (Annual).csv") |>
+  mutate(year = period_year(period), month = period_month(period)) |>
+  filter(month %in% c(3, 6, 9, 12), area != "New Zealand") |>   # year ending at each quarter-end month
+  transmute(ta = area, year, quarter = as.integer(month / 3), dwell_per_1000 = value)
+
+stopifnot(!anyDuplicated(per1000[c("ta", "year", "quarter")]))
+setdiff(unique(per1000$ta), unique(ta_q$ta))   # names should all match (expect none)
+```
+
+```{r features}
+rq1 <- ta_q |>
+  left_join(per1000, by = c("ta", "year", "quarter")) |>
+  group_by(ta) |>
+  arrange(t_index, .by_group = TRUE) |>
+  mutate(
+    avg_house_m2    = if_else(houses_n > 0, houses_m2 / houses_n, NA_real_),
+    log_houses_n    = log(pmax(houses_n, 1)),
+    multiunit_share = if_else(dwell_n > 0, 1 - houses_n / dwell_n, NA_real_),
+    apt_share       = if_else(dwell_n > 0, apt_n / dwell_n, NA_real_),
+    retire_share    = if_else(dwell_n > 0, retire_n / dwell_n, NA_real_),
+    houses_yoy      = log((houses_n + 1) / (lag(houses_n, 4) + 1)),
+    log_resid_alt_real = log1p(resid_alt_val_real),
+    log_nonres_real    = log1p(nonres_new_val_real),
+    # lagged response: only trusted when that quarter also had enough houses
+    real_cost_m2_lag1 = if_else(lag(houses_n, 1) >= MIN_HOUSES, lag(real_cost_m2, 1), NA_real_),
+    real_cost_m2_lag4 = if_else(lag(houses_n, 4) >= MIN_HOUSES, lag(real_cost_m2, 4), NA_real_)
+  ) |>
+  ungroup() |>
+  mutate(is_city   = str_detect(ta, " City$") | ta == "Auckland",
+         log_real_cost_m2 = log(real_cost_m2))
+```
+
+**Observation.** Lags and the year-on-year change are computed **before** any rows are filtered out, so a
+lag always refers to the true previous quarter rather than the previous *kept* row.
+
+## Relative cost: each district compared with the rest of New Zealand
+
+This response was added after the Step 2 EDA showed that time explains about 40% of the variation in real cost,
+and that 2020–2026 costs sit well above the training years.
+
+RQ1 asks about differences **across districts**. A cleaner response for that question is a district's cost
+**relative to the rest of the country in the same quarter**:
+
+$$
+\text{rel\_log\_cost\_m2} = \log(\text{district real \$/m}^2) - \log(\text{real \$/m}^2 \text{ of all other districts, same quarter})
+$$
+
+A value of +0.10 means "about 10% dearer than the rest of NZ that quarter". The national level is computed
+**leave-one-out** (excluding the district itself). Otherwise Auckland, which has up to 40% of all houses in some
+quarters, would partly be compared with itself. We do the same for house size (`rel_house_m2`).
+
+```{r relative}
+nat_q <- rq1 |>
+  group_by(yq) |>
+  summarise(nat_val_real = sum(houses_val * real_factor),
+            nat_m2 = sum(houses_m2), nat_n = sum(houses_n), .groups = "drop")
+
+rq1 <- rq1 |>
+  left_join(nat_q, by = "yq") |>
+  mutate(
+    loo_cost_m2     = (nat_val_real - houses_val * real_factor) / (nat_m2 - houses_m2),
+    loo_house_m2    = (nat_m2 - houses_m2) / (nat_n - houses_n),
+    rel_log_cost_m2 = log_real_cost_m2 - log(loo_cost_m2),
+    rel_house_m2    = log(avg_house_m2 / loo_house_m2)
+  ) |>
+  select(-nat_val_real, -nat_m2, -nat_n)
+
+rq1 |> filter(houses_n >= MIN_HOUSES) |>
+  summarise(mean_rel = mean(rel_log_cost_m2), sd_rel = sd(rel_log_cost_m2),
+            sd_abs = sd(log_real_cost_m2)) |> kable(digits = 3)
+```
+
+**Observation.** We keep **both** responses. `log_real_cost_m2` asks *"how expensive, in real terms?"*, which
+mixes national time effects with district effects. `rel_log_cost_m2` asks *"how much dearer or cheaper than the rest
+of NZ at the same time?"*, which isolates the district effect that RQ1 is about. Step 2 compares them.
+
+# Data quality: small counts and outliers
+
+## How many houses are behind each row?
+
+```{r small-counts}
+rq1 |>
+  summarise(rows = n(),
+            zero_houses     = sum(houses_n == 0),
+            under_5         = sum(houses_n < 5),
+            under_10        = sum(houses_n < 10),
+            median_houses   = median(houses_n)) |>
+  kable(caption = "District-quarters by number of new houses")
+
+rq1 |>
+  group_by(ta) |>
+  summarise(median_houses = median(houses_n),
+            share_under_min = mean(houses_n < MIN_HOUSES), .groups = "drop") |>
+  arrange(median_houses) |> head(10) |>
+  kable(digits = 2, caption = "The ten smallest districts")
+```
+
+## Ratios from few houses are noisy
+
+```{r funnel, fig.height = 4.2}
+p_funnel <- rq1 |>
+  filter(houses_n > 0) |>
+  ggplot(aes(houses_n, real_cost_m2)) +
+  geom_point(alpha = 0.25, size = 0.8, colour = "#2a6f97") +
+  geom_vline(xintercept = MIN_HOUSES, linetype = 2, colour = "#c0392b") +
+  scale_x_log10() +
+  scale_y_log10(labels = scales::label_dollar(accuracy = 1)) +
+  labs(title = "Districts with only a handful of houses give unreliable $/m²",
+       subtitle = paste0("Each point is a district-quarter; dashed line = minimum of ",
+                         MIN_HOUSES, " houses"),
+       x = "New houses in the quarter (log scale)",
+       y = "Real $/m² (log scale)")
+save_fig(p_funnel, "fig03_funnel_small_counts")
+```
+
+**Observation.** The spread narrows as the number of houses grows (a "funnel"). Below about 5 houses a single
+unusual consent (a tiny cabin, a luxury build) dominates the quarter. We keep these rows in the full file but
+**exclude rows with fewer than `r MIN_HOUSES` houses from modelling**. A sensitivity check with 10 can be run later
+by changing `MIN_HOUSES` at the top.
+
+## Extreme values that remain
+
+```{r extremes}
+kept <- rq1 |> filter(houses_n >= MIN_HOUSES)
+
+bind_rows(
+  kept |> slice_max(real_cost_m2, n = 5) |> mutate(end = "highest"),
+  kept |> slice_min(real_cost_m2, n = 5) |> mutate(end = "lowest")
+) |>
+  select(end, ta, yq, houses_n, avg_house_m2, nominal_cost_m2, real_cost_m2) |>
+  kable(digits = 0, caption = "Most extreme real $/m² among modelled rows")
+
+quantile(kept$real_cost_m2, c(0, .01, .05, .25, .5, .75, .95, .99, 1)) |> round(0)
+```
+
+## Shape of the response
+
+```{r response-shape, fig.height = 3.6}
+p_resp <- kept |>
+  select(`Real $/m²` = real_cost_m2, `log(real $/m²)` = log_real_cost_m2) |>
+  pivot_longer(everything()) |>
+  ggplot(aes(value)) +
+  geom_histogram(bins = 60, fill = "#2a6f97") +
+  facet_wrap(~ name, scales = "free") +
+  labs(title = "In real dollars the response is close to bell-shaped, with a slightly longer right tail",
+       x = NULL, y = "District-quarters")
+save_fig(p_resp, "fig04_response_distribution", height = 3.4)
+```
+
+**Observation.** Once inflation is removed, most of the skew disappears: the middle 98% of modelled rows lie
+between about $2,000 and $4,150 per m² (median about $2,800), with a slightly longer right tail and a few
+very low quarters from small districts in the early 1990s. Nominal dollars would have been strongly
+skewed, because they mix the price levels of different decades.
+
+We will still model **`log(real $/m²)`** as the main response, because (i) effects of drivers on cost are
+naturally multiplicative ("10% more expensive"), so coefficients read as percentage effects, and (ii) it
+tames the remaining tails slightly. Trees and random forests don't need this, but using the same response for
+every model keeps the comparison fair. Both versions are saved, so we can check in Step 3 whether it matters.
+
+# Train / test split
+
+The split is **by time**, not random. All districts move together with the national building cycle, so a
+random split would put quarters from the same year in both sets and make the test score look better than it is.
+
+```{r split}
+rq1 <- rq1 |>
+  mutate(split    = if_else(year <= TRAIN_LAST_Y, "train", "test"),
+         in_model = houses_n >= MIN_HOUSES & !is.na(real_cost_m2))
+
+split_tab <- rq1 |>
+  group_by(split) |>
+  summarise(period = paste(min(yq), "to", max(yq)),
+            all_rows = n(),
+            modelled_rows = sum(in_model),
+            districts_modelled = n_distinct(ta[in_model]), .groups = "drop") |>
+  arrange(desc(split))
+save_tab(split_tab, "t03_split_sizes") |> kable(caption = "Train/test split")
+
+p_split <- rq1 |>
+  filter(in_model) |>
+  count(year, split) |>
+  ggplot(aes(year, n, fill = split)) +
+  geom_col() +
+  scale_fill_manual(values = c(train = "#2a6f97", test = "#e07a1f")) +
+  labs(title = "Chronological split: train on 1990–2019, test on 2020–2026",
+       x = NULL, y = "Modelled district-quarters", fill = NULL) +
+  theme(legend.position = "top")
+save_fig(p_split, "fig05_train_test_split", height = 3.4)
+```
+
+**Observation.** The pitch's 7,973 / 1,742 counts were for *all* district-quarters; after dropping rows with
+fewer than `r MIN_HOUSES` houses the modelled counts are those in the table above. 2026 has only two
+quarters, and `dwell_per_1000` starts in 1996, so the earliest training years will have that feature missing.
+
+# Save the processed data
+
+```{r save}
+dir.create(paths$processed, showWarnings = FALSE, recursive = TRUE)
+
+col_order <- c(
+  # keys
+  "ta", "region", "island", "is_city", "year", "quarter", "yq", "t_index", "split", "in_model",
+  # response
+  "real_cost_m2", "log_real_cost_m2", "rel_log_cost_m2", "nominal_cost_m2",
+  # raw quantities
+  "houses_n", "houses_m2", "houses_val", "dwell_n", "apt_n", "retire_n", "town_n",
+  "resid_new_val", "resid_alt_val", "nonres_new_val",
+  # features
+  "avg_house_m2", "rel_house_m2", "log_houses_n", "multiunit_share", "apt_share", "retire_share",
+  "dwell_per_1000", "houses_yoy", "log_resid_alt_real", "log_nonres_real",
+  "real_cost_m2_lag1", "real_cost_m2_lag4",
+  # deflators
+  "gst", "cgpi_dwell", "cgpi_resid", "cgpi_nonres", "real_factor", "loo_cost_m2", "loo_house_m2"
+)
+rq1 <- rq1 |> select(all_of(col_order))
+
+# full frame (all 9,715 district-quarters, with flags)
+write_csv(rq1, file.path(paths$processed, "rq1_district_quarter_full.csv"))
+
+# model-ready rows only, as CSV (for anyone) and RDS (keeps factor types for R)
+rq1_model <- rq1 |>
+  filter(in_model) |>
+  mutate(across(c(ta, region, island, split), factor),
+         quarter = factor(quarter))
+write_csv(rq1_model, file.path(paths$processed, "rq1_model_data.csv"))
+saveRDS(rq1_model,  file.path(paths$processed, "rq1_model_data.rds"))
+
+list.files(paths$processed)
+dim(rq1); dim(rq1_model)
+```
+
+## Data dictionary
+
+```{r dictionary}
+dictionary <- tribble(
+  ~column, ~description,
+  "ta", "Territorial authority (district / city), as named by Stats NZ (no macrons)",
+  "region", "Regional council area (majority-population assignment, see data/reference)",
+  "island", "North / South / Chatham",
+  "is_city", "TRUE for city councils (name ends in 'City', plus Auckland)",
+  "year, quarter, yq", "Calendar year, quarter (1-4) and label such as 2019Q3",
+  "t_index", "Quarter number, 1990Q1 = 1 (numeric time trend)",
+  "split", "train (to 2019Q4) or test (2020Q1 to 2026Q2)",
+  "in_model", paste0("TRUE if at least ", MIN_HOUSES, " new houses (row used for modelling)"),
+  "real_cost_m2", "RESPONSE: consented value per m2 of new houses, June-2026-quarter dollars incl. 15% GST, deflated by CGPI dwelling units",
+  "log_real_cost_m2", "Natural log of real_cost_m2",
+  "rel_log_cost_m2", "RESPONSE (relative): log(real_cost_m2) minus log of real $/m2 of all OTHER districts in the same quarter",
+  "rel_house_m2", "log(avg_house_m2 / average new-house size in all other districts, same quarter)",
+  "loo_cost_m2, loo_house_m2", "Leave-one-out national real $/m2 and average house size (all other districts, same quarter)",
+  "nominal_cost_m2", "Value / floor area in dollars of the day, GST incl. (reference only)",
+  "houses_n, houses_m2, houses_val", "New houses consented: count, floor area (m2), value ($ nominal, GST incl.)",
+  "dwell_n, apt_n, retire_n, town_n", "New dwelling units: total, apartments, retirement village units, townhouses/flats/units",
+  "resid_new_val, resid_alt_val, nonres_new_val", "Nominal $ value: new residential, residential alterations, new non-residential",
+  "avg_house_m2", "Average floor area of a new house (m2)",
+  "log_houses_n", "log(number of new houses)",
+  "multiunit_share", "Share of new dwellings that are not stand-alone houses",
+  "apt_share, retire_share", "Share of new dwellings that are apartments / retirement village units",
+  "dwell_per_1000", "New dwellings in the 12 months to the quarter-end, per 1000 residents (from 1996)",
+  "houses_yoy", "log((houses + 1) / (houses same quarter last year + 1))",
+  "log_resid_alt_real, log_nonres_real", "log(1 + real $) of residential alterations / new non-residential work",
+  "real_cost_m2_lag1, _lag4", "real_cost_m2 one / four quarters earlier (NA if that quarter had too few houses)",
+  "gst, cgpi_*, real_factor", "GST rate of the day, price indices, and the multiplier nominal -> real"
+)
+write_csv(dictionary, file.path(paths$processed, "rq1_data_dictionary.csv"))
+kable(dictionary)
+```
+
+# Summary of decisions
+
+| # | Decision | Reason |
+|---|---|---|
+| 1 | Main source: TA monthly file, new **houses** only | Only file with district value + floor area |
+| 2 | Unit = district-quarter, complete quarters only (1990Q2–2026Q2) | Monthly counts too noisy; 2026Q3 is partial |
+| 3 | Drop "Area Outside TA" and the NZ total | Not districts |
+| 4 | Remove GST of the day, deflate by CGPI Dwelling units, express in June-2026 $ incl. 15% GST | Compare all years on one price basis, without the 2010 GST step |
+| 5 | Model rows need ≥ `r MIN_HOUSES` houses | Ratios from very few houses are noise |
+| 6 | Responses `log(real $/m²)` and relative cost `rel_log_cost_m2` (raw also saved) | Effects read as percentages; relative cost isolates differences between districts |
+| 7 | No feature uses house value (lagged cost is saved but kept out of the main models) | Avoid leaking the answer |
+| 8 | Train ≤ 2019, test 2020–2026 | Time-ordered validation, as pitched |
+| 9 | Keep Auckland as one district | Simple first; local boards are an option later |
+
+**Next step (Step 2):** exploratory analysis of the processed table: how real $/m² varies by district,
+region and time, and which features relate to it. That will guide which features go into the models (Step 3).
+
+# Appendix: helper functions
+
+This notebook uses helper functions from `R/utils_data.R`, printed here so the document is complete on its own.
+
+```{r appendix-utils-data, code = readLines(file.path(proj_root, "R", "utils_data.R")), eval = FALSE}
+```
+
+```{r session, include = FALSE}
+sessionInfo()
+```

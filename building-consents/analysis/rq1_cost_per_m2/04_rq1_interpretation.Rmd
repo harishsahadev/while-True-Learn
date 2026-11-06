@@ -1,0 +1,576 @@
+---
+title: "RQ1 Step 4: Interpreting the models and answering RQ1"
+subtitle: "What drives the real cost per m² of new houses across districts?"
+author: "while True: learn(), Group 8, STAT462"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: show
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE,
+                      fig.align = "center", out.width = "85%")
+find_proj_root <- function(path = getwd()) {
+  path <- normalizePath(path)
+  repeat {
+    if (length(list.files(path, pattern = "\\.Rproj$"))) return(path)
+    parent <- dirname(path)
+    if (parent == path) stop("No .Rproj file found above ", getwd())
+    path <- parent
+  }
+}
+proj_root <- find_proj_root()
+knitr::opts_knit$set(root.dir = proj_root)
+
+# cached chunks re-run whenever the data, the helpers or the Step 3 results change
+file_md5 <- tools::md5sum(file.path(proj_root, c("data/processed/rq1_model_data.rds", "R/utils_models.R",
+                                                 "outputs/models/rq1/rq1_step3_results.rds")))
+knitr::opts_chunk$set(cache.extra = file_md5)
+```
+
+```{r load}
+source(file.path(proj_root, "R", "utils_data.R"))
+source(file.path(proj_root, "R", "utils_models.R"))
+suppressPackageStartupMessages({
+  library(knitr)
+  library(glmnet)
+  library(ranger)
+})
+N_CORES <- max(1, parallel::detectCores() - 1)
+
+rq1 <- readRDS(file.path(paths$processed, "rq1_model_data.rds"))
+dat <- rq1 |>
+  filter(year >= 1996, !ta %in% c("Chatham Islands Territory", "Kawerau District")) |>
+  droplevels()
+train <- dat |> filter(split == "train")
+test  <- dat |> filter(split == "test")
+
+# same response, features and folds as Step 3
+Y <- "rel_log_cost_m2"
+num_main <- c("rel_house_m2", "log_houses_n", "multiunit_share", "apt_share", "retire_share",
+              "dwell_per_1000", "houses_yoy", "log_resid_alt_real", "log_nonres_real")
+fsets <- list(drivers  = c(num_main, "region", "is_city"),
+              district = c(num_main, "ta"))
+folds <- make_time_folds(train$year)
+
+s3 <- readRDS(file.path(paths$models_rq1, "rq1_step3_results.rds"))
+s3$chosen |> select(set, model, best_settings, cv_rmse) |> kable(digits = 4, caption = "Models chosen in Step 3")
+```
+
+# Purpose
+
+Step 3 chose two models with the one-standard-error rule:
+
+* a random forest on the **drivers** set (measured features plus region and city), and
+* ridge regression on the **district** set (measured features plus the district itself).
+
+Step 3 told us *which* features matter. This notebook asks *how* they matter and where the models fail:
+
+1. How does the prediction change as each driver changes (partial dependence)?
+2. Do the drivers mean the same thing when we compare districts with each other as when we follow one district
+   over time?
+3. How much of each district's premium or discount is left once its drivers are accounted for?
+4. Where and when are the test predictions wrong?
+5. Would finer tuning have changed anything?
+
+It ends with the answer to RQ1 and saves final models for later use (an app or poster).
+
+The test set was already used once in Step 3. Nothing here changes a model because of test results: section 6
+only describes the test errors, and section 7 uses cross-validation only.
+
+# Refit the models on all training years
+
+We refit three models on 1996–2019 at the settings Step 3 chose. The ridge model on the drivers set is not one of
+the chosen models, but it gives a straight-line version of the same features to compare with the forest.
+
+```{r refit}
+rhs_of <- function(vars) paste(vars, collapse = " + ")
+fml_of <- function(y, vars) as.formula(paste(y, "~", rhs_of(vars)))
+lambda_grid <- 10^seq(1, -6, length.out = 100)       # same grid as Step 3
+best <- s3$best_settings
+
+# random forest, drivers set (chosen)
+b_rf <- best[["Random forest"]]$drivers
+rf_drv <- ranger(fml_of(Y, fsets$drivers), data = train, num.trees = 500,
+                 mtry = b_rf$mtry, min.node.size = b_rf$min.node.size,
+                 num.threads = N_CORES, seed = 462)
+
+# ridge, drivers set (straight-line comparison) and district set (chosen)
+fit_ridge <- function(vars, lambda, data = train) {
+  rhs <- rhs_of(vars)
+  list(fit = glmnet(make_x(data, rhs), data[[Y]], alpha = 0, lambda = lambda_grid),
+       rhs = rhs, lambda = lambda)
+}
+predict_ridge <- function(m, newdata) as.numeric(predict(m$fit, make_x(newdata, m$rhs), s = m$lambda))
+
+ridge_drv  <- fit_ridge(fsets$drivers,  best$Ridge$drivers$lambda)
+ridge_dist <- fit_ridge(fsets$district, best$Ridge$district$lambda)
+
+# one prediction function per model, so the code below treats them alike
+pred_funs <- list(
+  "Random forest, drivers" = function(d) predict(rf_drv, d, num.threads = N_CORES)$predictions,
+  "Ridge, drivers"         = function(d) predict_ridge(ridge_drv, d),
+  "Ridge, district"        = function(d) predict_ridge(ridge_dist, d))
+
+# check: the refitted models reproduce the Step 3 test RMSE
+step3_rmse <- s3$test |> filter((model == "Random forest" & set == "drivers") |
+                                 (model == "Ridge" & set %in% c("drivers", "district"))) |>
+  transmute(model = paste0(model, ", ", set), step3 = test_rmse)
+tibble(model = names(pred_funs),
+       refit = map_dbl(pred_funs, \(f) reg_metrics(test[[Y]], f(test))$rmse)) |>
+  left_join(step3_rmse, by = "model") |> kable(digits = 4, caption = "Test RMSE: refit vs Step 3")
+```
+
+**Observation.** The refitted models give the same test RMSE as Step 3, so the plots below describe the models
+that were actually evaluated.
+
+# How each driver changes the prediction (partial dependence)
+
+A **partial dependence plot** shows how a model's average prediction changes as one feature moves, with all other
+features kept at their observed values. For each value *v* on a grid we set that feature to *v* in every training
+row, predict, and average. The result is the model's view of that feature's effect, averaged over everything else.
+
+We use the 5th to 95th percentile of each feature, since the tails have few rows. Curves are centred at zero, so
+the y-axis reads as "% dearer or cheaper than the model's average prediction".
+
+```{r pdp-fun}
+# partial dependence of one feature: average prediction with the feature fixed at each grid value
+partial_dependence <- function(pred_fun, data, var, grid) {
+  map_dbl(grid, function(v) {
+    data[[var]] <- v
+    mean(pred_fun(data))
+  })
+}
+
+pdp_vars <- c("log_resid_alt_real", "dwell_per_1000", "log_houses_n",
+              "rel_house_m2", "log_nonres_real", "houses_yoy")
+
+# labels, and how to show each feature's values in natural units in the panel titles
+pdp_labels <- tribble(
+  ~feature,             ~label,                                    ~fmt,
+  "log_resid_alt_real", "Residential alterations ($ per quarter)", \(x) paste0("$", signif(expm1(x) / 1e6, 2), "m"),
+  "dwell_per_1000",     "New dwellings per 1,000 residents",       \(x) as.character(round(x, 1)),
+  "log_houses_n",       "New houses in the quarter",               \(x) as.character(round(exp(x))),
+  "rel_house_m2",       "House size vs rest of NZ",                \(x) sprintf("%+.0f%%", 100 * (exp(x) - 1)),
+  "log_nonres_real",    "New non-residential work ($ per quarter)", \(x) paste0("$", signif(expm1(x) / 1e6, 2), "m"),
+  "houses_yoy",         "Houses vs same quarter last year",        \(x) sprintf("%+.0f%%", 100 * (exp(x) - 1))
+)
+pdp_probs <- seq(0.05, 0.95, by = 0.05)
+```
+
+```{r pdp, cache = TRUE}
+pdp <- expand_grid(model = names(pred_funs), feature = pdp_vars) |>
+  pmap_dfr(function(model, feature) {
+    grid <- quantile(train[[feature]], pdp_probs, names = FALSE)
+    yhat <- partial_dependence(pred_funs[[model]], train, feature, grid)
+    tibble(model, feature, pctile = pdp_probs, value = grid, yhat)
+  }) |>
+  group_by(model, feature) |>
+  mutate(effect = yhat - mean(yhat)) |>
+  ungroup()
+```
+
+```{r pdp-plot, fig.height = 6, out.width = "100%"}
+# panel title: feature name and its 5th-95th percentile range in natural units
+panel_titles <- pdp_labels |>
+  mutate(range = map2_chr(feature, fmt, \(v, f) paste(f(quantile(train[[v]], c(0.05, 0.95))), collapse = " to ")),
+         title = paste0(label, "\n(", range, ")"))
+
+p_pdp <- pdp |>
+  left_join(panel_titles |> select(feature, title), by = "feature") |>
+  mutate(title = factor(title, levels = panel_titles$title)) |>
+  ggplot(aes(100 * pctile, 100 * effect, colour = model)) +
+  geom_hline(yintercept = 0, colour = "grey70") +
+  geom_line(linewidth = 0.9) +
+  facet_wrap(~title, ncol = 3) +
+  scale_colour_manual(values = c("Random forest, drivers" = "#2a6f97", "Ridge, drivers" = "#9aa5b1",
+                                 "Ridge, district" = "#e76f51")) +
+  labs(title = "How the predicted relative cost changes as each driver increases",
+       subtitle = "Partial dependence, centred at zero. x = percentile of the feature among training rows",
+       x = "Percentile of the feature (5th to 95th)", y = "Effect on relative cost (%)", colour = NULL) +
+  theme(legend.position = "top", strip.text = element_text(size = 8.5))
+save_fig(p_pdp, "fig24_partial_dependence", height = 6, width = 9)
+```
+
+```{r effect-table}
+# size of each effect: change in prediction from the 10th to the 90th percentile of the feature
+effect_10_90 <- expand_grid(model = names(pred_funs), feature = pdp_vars) |>
+  pmap_dfr(function(model, feature) {
+    q <- quantile(train[[feature]], c(0.1, 0.9), names = FALSE)
+    change <- diff(partial_dependence(pred_funs[[model]], train, feature, q))
+    tibble(model, feature, change)
+  }) |>
+  mutate(change_pct = 100 * (exp(change) - 1)) |>
+  select(-change) |>
+  pivot_wider(names_from = model, values_from = change_pct) |>
+  left_join(pdp_labels |> select(feature, label), by = "feature") |>
+  relocate(label, .after = feature)
+save_tab(effect_10_90, "t12_effect_sizes") |>
+  kable(digits = 1, caption = "Change in predicted relative cost (%) from the 10th to the 90th percentile of each feature")
+```
+
+**Observation.** The table gives the change from a typical low value (10th percentile) to a typical high value
+(90th percentile) of each feature.
+
+* **Residential alteration spending** has the largest and most consistent effect. All three models agree: moving
+  from the 10th to the 90th percentile raises the predicted relative cost by about
+  `r sprintf("%+.1f", effect_10_90[["Random forest, drivers"]][effect_10_90$feature == "log_resid_alt_real"])`% (forest) to `r sprintf("%+.1f", effect_10_90[["Ridge, drivers"]][effect_10_90$feature == "log_resid_alt_real"])`% (ridge).
+  The forest's curve is close to a straight line, so the linear models describe this driver well.
+* **New dwellings per 1,000 residents** adds `r sprintf("%+.1f", effect_10_90[["Random forest, drivers"]][effect_10_90$feature == "dwell_per_1000"])`%
+  between the 10th and 90th percentile in the forest, and the forest's curve then jumps by about another 4% in the
+  fastest-growing tenth (more than about 11 new dwellings per 1,000 residents a year). A straight line cannot bend
+  like this, so the ridge model spreads the effect evenly instead.
+* **Number of new houses** is where the models disagree. The drivers-set ridge says more houses means cheaper
+  (`r sprintf("%+.1f", effect_10_90[["Ridge, drivers"]][effect_10_90$feature == "log_houses_n"])`%). The district-set ridge says the opposite (`r sprintf("%+.1f", effect_10_90[["Ridge, district"]][effect_10_90$feature == "log_houses_n"])`%).
+  The forest shows almost no overall effect. Section 4 explains why.
+* **House size**, **non-residential work** and **year-on-year change in houses** each move the prediction by 2% or
+  less. Houses bigger than the rest of NZ are slightly cheaper per m², as expected from fixed costs (kitchens,
+  bathrooms, consents) being spread over more floor area, but the effect is small.
+
+Most effects are a few percent, small next to the ±15–20% gaps between the dearest and cheapest districts. The
+measured drivers shift a district's cost at the margin. They do not explain most of the gap between places.
+
+## Do two drivers work together? (interaction)
+
+The tree in Step 3 split first on alteration spending and then on growth, which suggests the two act together.
+A two-way partial dependence plot fixes both features on a grid and averages the forest's predictions.
+
+```{r pdp2, cache = TRUE}
+g_alt  <- quantile(train$log_resid_alt_real, seq(0.05, 0.95, length.out = 10), names = FALSE)
+g_grow <- quantile(train$dwell_per_1000,     seq(0.05, 0.95, length.out = 10), names = FALSE)
+pdp2 <- expand_grid(alt = g_alt, grow = g_grow) |>
+  mutate(yhat = map2_dbl(alt, grow, function(a, g) {
+    d <- train; d$log_resid_alt_real <- a; d$dwell_per_1000 <- g
+    mean(pred_funs[["Random forest, drivers"]](d))
+  }))
+```
+
+```{r pdp2-plot, fig.height = 4.2}
+p_pdp2 <- pdp2 |>
+  mutate(effect = 100 * (yhat - mean(yhat)),
+         alt_m = factor(signif(expm1(alt) / 1e6, 2)), grow = factor(round(grow, 1))) |>
+  ggplot(aes(alt_m, grow, fill = effect)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = sprintf("%+.0f", effect)), size = 2.8) +
+  scale_fill_gradient2(low = "#2a6f97", mid = "white", high = "#e76f51", midpoint = 0) +
+  labs(title = "Random forest: alteration spending and growth together",
+       subtitle = "Two-way partial dependence; numbers = % above or below the average prediction",
+       x = "Residential alterations ($m per quarter)", y = "New dwellings per 1,000 residents",
+       fill = "Effect (%)")
+save_fig(p_pdp2, "fig25_interaction_alterations_growth", height = 4.2, width = 8)
+```
+
+**Observation.** The two drivers reinforce each other. With low alteration spending, growth barely matters
+(the left columns are all about −3% to −5%). With high alteration spending, fast growth adds a lot: the top-right
+corner is about +14%, while high spending with slow growth is about +3%. The dearest new houses are found where both
+are true: a wealthy market with a lot of renovation work *and* rapid population growth. Queenstown-Lakes is the
+clearest example. A model with only additive terms (OLS, GAM) cannot represent this, which is one reason the forest
+beat them on the drivers set.
+
+# Comparing districts versus following one district over time
+
+The drivers set has no district variable, so its coefficients mix two comparisons. One is *between* districts
+(is a busy district dearer than a quiet one?). The other is *within* a district over time (is a district dearer in
+its busy quarters?). Once the district is in the model, every district gets its own level, and the remaining
+coefficients describe only the within-district comparison.
+
+Comparing the standardised ridge coefficients of the two sets shows which drivers change meaning.
+
+```{r within-between}
+std_coef <- function(m, data) {
+  x <- make_x(data, m$rhs)
+  b <- as.matrix(coef(m$fit, s = m$lambda))[-1, 1]
+  tibble(feature = names(b), coef = b * apply(x, 2, sd)) |> filter(feature %in% num_main)
+}
+within_between <- std_coef(ridge_drv, train) |> rename(`drivers set (between + within)` = coef) |>
+  left_join(std_coef(ridge_dist, train) |> rename(`district set (within only)` = coef), by = "feature") |>
+  mutate(`sign flips` = sign(`drivers set (between + within)`) != sign(`district set (within only)`)) |>
+  arrange(desc(abs(`drivers set (between + within)`)))
+save_tab(within_between, "t13_within_between") |>
+  kable(digits = 4, caption = "Ridge, standardised coefficients (log points per 1 SD of the feature)")
+```
+
+**Observation.** Two drivers change meaning once the district is held fixed.
+
+* **Number of new houses** flips sign. *Between* districts, places that build many houses are cheaper per m² than
+  places with the same alteration spending and growth that build fewer (volume builders, large subdivisions such
+  as Selwyn). On its own, without alteration spending in the model, the number of houses has a small positive
+  link with cost, because both measure how big a district's building market is (correlation 0.84). *Within* a district, its busier quarters are dearer
+  (more demand for the same builders and materials). The drivers-set model mixes the two, and the between-district
+  pattern dominates. This also explains the flat forest curve in section 3: the forest combines the two opposite
+  patterns.
+* **Dwellings per 1,000 residents** shrinks from 0.031 to 0.004. Fast-growing *districts* are dearer, but a
+  district is not much dearer in its own fast-growth years. The growth effect is mostly a difference between places.
+
+Alteration spending keeps the same sign and a similar size in both sets, so it holds both between and within
+districts. The mix shares (apartments, retirement units, multi-unit) are close to zero in both, and their sign
+flips are noise.
+
+# How much of each district's premium do the drivers explain?
+
+In the district-set ridge model, each district has its own coefficient. That coefficient is the part of the
+district's relative cost that its measured drivers do **not** explain. We compare it with the district's raw
+average relative cost over 1996–2019. Both are centred on the average district so they are on the same footing.
+Ridge shrinks the coefficients of small districts towards the average, so their premiums are conservative.
+
+```{r premium}
+b_dist <- as.matrix(coef(ridge_dist$fit, s = ridge_dist$lambda))[, 1]
+ta_levels <- levels(train$ta)
+premium <- tibble(ta = ta_levels,
+                  after = c(0, b_dist[paste0("ta", ta_levels[-1])])) |>   # first level is the reference (0)
+  left_join(train |> group_by(ta) |> summarise(raw = mean(rel_log_cost_m2), quarters = n()) |>
+              mutate(ta = as.character(ta)), by = "ta") |>
+  mutate(after = after - mean(after), raw = raw - mean(raw),
+         explained = raw - after)
+
+premium_show <- bind_rows(premium |> slice_max(after, n = 10), premium |> slice_min(after, n = 10)) |>
+  mutate(name = fct_reorder(str_remove(ta, " District| City"), after))
+
+p_prem <- premium_show |>
+  pivot_longer(c(raw, after), names_to = "measure", values_to = "value") |>
+  mutate(measure = recode(measure, raw = "Raw average", after = "After accounting for drivers")) |>
+  ggplot(aes(100 * value, name)) +
+  geom_vline(xintercept = 0, colour = "grey70") +
+  geom_line(aes(group = name), colour = "grey75") +
+  geom_point(aes(colour = measure), size = 2.3) +
+  scale_colour_manual(values = c("Raw average" = "#9aa5b1", "After accounting for drivers" = "#e76f51")) +
+  labs(title = "Location premium before and after the measured drivers",
+       subtitle = "Ten dearest and ten cheapest districts after drivers (ridge, district set, 1996–2019)",
+       x = "Relative cost vs the average district (%)", y = NULL, colour = NULL) +
+  theme(legend.position = "top")
+save_fig(p_prem, "fig26_district_premium", height = 5.5, width = 8)
+
+c(sd_raw = sd(premium$raw), sd_after = sd(premium$after),
+  share_of_spread_left = var(premium$after) / var(premium$raw))
+```
+
+**Observation.** The measured drivers explain only part of why some districts are dear.
+
+* The spread of district premiums falls only from `r fmt_pct(sd(premium$raw), 1)` to `r fmt_pct(sd(premium$after), 1)`
+  (standard deviation, log scale). About `r fmt_pct(1 - var(premium$after) / var(premium$raw), 0)` of the variance
+  between district averages is explained by the drivers; the rest is location itself. Ridge shrinkage makes the
+  "after" values slightly smaller than they would be without the penalty, so if anything this overstates the
+  share explained.
+* **Queenstown-Lakes** stays the dearest district even after its drivers (about +15% vs the average district).
+  **Thames-Coromandel** and **Wellington City** lose about half their premium: their high alteration spending
+  accounts for that part.
+* **Auckland and Christchurch** move from dearer than average to cheaper than their drivers predict. They have the
+  largest alteration and non-residential spending in the country, so the model expects them to be very dear, and
+  they are less dear than that. This shows a weakness in our features: the activity measures are **total dollars**,
+  so they partly measure district *size*. Per-resident versions would separate size from wealth (see the
+  limitations in section 8).
+* **Selwyn, Hamilton and Horowhenua** remain cheap after their drivers. These are flat, easy-to-build greenfield
+  markets with volume builders, which our features do not capture directly.
+
+# Where are the test predictions wrong?
+
+We use the test predictions saved in Step 3 for the two chosen models and the district-mean baseline. A residual
+here is *predicted minus actual*, so a negative residual means the model under-predicted.
+
+```{r test-preds}
+tp <- s3$test_predictions |>
+  mutate(model = paste0(model, ", ", set)) |>
+  filter(model %in% c("Random forest, drivers", "Ridge, district", "District mean, none")) |>
+  mutate(model = recode(model, "District mean, none" = "District mean (baseline)"),
+         resid = pred - obs) |>
+  left_join(test |> mutate(row = row_number()) |> select(row, houses_n), by = "row")
+```
+
+## By year
+
+```{r by-year, fig.height = 3.6}
+by_year <- tp |>
+  group_by(model, year) |>
+  summarise(rmse = sqrt(mean(resid^2)), bias = mean(resid), .groups = "drop") |>
+  left_join(test |> group_by(year) |> summarise(spread = sd(.data[[Y]])), by = "year")
+
+p_year <- by_year |>
+  ggplot(aes(year, rmse, colour = model)) +
+  geom_line(linewidth = 0.8) + geom_point(size = 1.8) +
+  geom_line(aes(y = spread, colour = "Spread of actual values (SD)"), linetype = 2) +
+  scale_colour_manual(values = c("Random forest, drivers" = "#2a6f97", "Ridge, district" = "#e76f51",
+                                 "District mean (baseline)" = "#9aa5b1",
+                                 "Spread of actual values (SD)" = "grey30")) +
+  scale_x_continuous(breaks = 2020:2026) +
+  labs(title = "Test error by year",
+       subtitle = "Errors grow after 2023, along with the spread between districts. 2026 has two quarters only.",
+       x = NULL, y = "RMSE (log scale)", colour = NULL) +
+  theme(legend.position = "right")
+save_fig(p_year, "fig27_test_error_by_year", height = 3.6, width = 8.5)
+
+by_year |> select(model, year, rmse, bias) |>
+  pivot_wider(names_from = model, values_from = c(rmse, bias)) |> kable(digits = 3)
+```
+
+**Observation.** All three models have their smallest errors in 2020–2022 and their largest in 2024, the year the
+spread between districts peaked (dashed line). The ridge model beats the district-mean baseline in 2020–2023 and
+falls slightly behind it in 2024–2026. The relationships learned before 2020 held for a few years and then started
+to drift.
+
+Every model under-predicts on average (negative bias, about −2% early on and −4% by 2025–26). The average relative
+cost of the modelled districts rose after 2020: smaller districts became dearer compared with the large centres
+that dominate the "rest of NZ" average. A model trained on 1996–2019 has no way to know this.
+
+## By number of houses
+
+```{r by-size, fig.height = 3.4}
+by_size <- tp |>
+  mutate(size = cut(houses_n, c(4, 9, 24, 49, 99, Inf),
+                    labels = c("5–9", "10–24", "25–49", "50–99", "100+"))) |>
+  group_by(model, size) |>
+  summarise(rows = n(), rmse = sqrt(mean(resid^2)), .groups = "drop")
+
+p_size <- ggplot(by_size, aes(size, rmse, fill = model)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c("Random forest, drivers" = "#2a6f97", "Ridge, district" = "#e76f51",
+                               "District mean (baseline)" = "#9aa5b1")) +
+  labs(title = "Errors are largest where few houses are built",
+       x = "New houses in the district-quarter", y = "Test RMSE (log scale)", fill = NULL) +
+  theme(legend.position = "top")
+save_fig(p_size, "fig28_test_error_by_size", height = 3.4)
+
+by_size |> filter(model == "Ridge, district") |> select(size, rows, rmse) |> kable(digits = 3)
+```
+
+**Observation.** Error falls steadily as the number of houses rises: RMSE is about
+`r round(by_size$rmse[by_size$model == "Ridge, district" & by_size$size == "5–9"], 2)` for district-quarters with 5–9
+houses and `r round(by_size$rmse[by_size$model == "Ridge, district" & by_size$size == "100+"], 2)` for those with 100 or
+more. This is the same funnel as in Step 1: with few houses, one unusual consent moves the quarter's $/m². Part of
+the test error is therefore noise in the response that no model could remove.
+
+## By district
+
+```{r by-district}
+by_district <- tp |>
+  filter(model == "Ridge, district") |>
+  group_by(ta) |>
+  summarise(quarters = n(), median_houses = median(houses_n),
+            mean_resid = mean(resid), rmse = sqrt(mean(resid^2)), .groups = "drop") |>
+  arrange(desc(rmse))
+save_tab(by_district, "t14_test_error_by_district") |>
+  head(10) |>
+  kable(digits = 3, caption = "Ridge (district set): ten districts with the largest test RMSE")
+```
+
+**Observation.** Two groups stand out.
+
+* **Small districts** (Ōpōtiki, Wairoa, Otorohanga, Waimate) with a median of 6–9 houses a quarter. Their errors are
+  mostly noise, as the previous section showed.
+* **Larger districts that changed after 2020.** Coastal and lifestyle districts (Kaipara, Thames-Coromandel,
+  Western Bay of Plenty, Queenstown-Lakes) were under-predicted by 12–15%: they became even dearer relative to the
+  rest of NZ. Waimakariri, a volume-building district north of Christchurch, was over-predicted by about 14%: it
+  became cheaper. These look like real shifts in the market after COVID (more demand for lifestyle and holiday
+  areas, more volume building in Canterbury) rather than model errors that better tuning could fix.
+
+# Would finer tuning change anything?
+
+Step 3 searched a coarse grid. Here we search a finer grid around the forest's chosen settings, using the same
+training folds. Ridge needs no refinement: its λ grid already has 100 values. We only look at CV scores, because
+the test set has been used.
+
+```{r refine, cache = TRUE}
+fp_rf <- function(vars, y) function(tr, nw, p)
+  predict(ranger(fml_of(y, vars), data = tr, num.trees = 500, mtry = p$mtry,
+                 min.node.size = p$min.node.size, num.threads = N_CORES, seed = 462), data = nw)$predictions
+rf_fine <- cv_tune(fp_rf(fsets$drivers, Y),
+                   expand_grid(mtry = 5:8, min.node.size = c(10, 15, 20, 30)),
+                   train, folds, Y)
+```
+
+```{r refine-table}
+rf_step3 <- s3$cv |> filter(model == "Random forest", set == "drivers")
+rf_fine$summary |> head(5) |> select(mtry, min.node.size, cv_rmse, cv_rmse_sd) |>
+  kable(digits = 4, caption = "Finer forest grid, best five settings")
+c(step3_cv_rmse = rf_step3$cv_rmse, step3_se = rf_step3$cv_rmse_se,
+  refined_cv_rmse = rf_fine$best$cv_rmse,
+  gain = rf_step3$cv_rmse - rf_fine$best$cv_rmse)
+```
+
+**Observation.** The finer grid picks the same setting as Step 3 (`mtry` = 6, `min.node.size` = 20), and the
+top five settings are within 0.0001 of each other, far less than one standard error
+(`r round(rf_step3$cv_rmse_se, 4)`). The forest is not sensitive to its settings near the optimum, so further tuning
+would not change any conclusion. We keep the Step 3 models.
+
+# Answer to RQ1
+
+**Question.** What drives the real cost per m² of new houses across New Zealand districts?
+
+**Short answer.** Location matters most. The measured drivers explain a modest part of it, led by how much a
+district spends on renovating existing homes and how fast it is growing.
+
+| Driver | Direction | Size (10th → 90th percentile) | Evidence |
+|---|---|---|---|
+| Residential alteration spending | dearer | about +8% to +11% | top feature in all three importance methods; same sign between and within districts |
+| Region (broad location) | varies | up to about ±10% | second in importance in Step 3 |
+| Dwellings per 1,000 residents | dearer | about +3% to +6%, plus about +4% more in the fastest-growing 10% | differs *between* districts, little *within* |
+| Number of new houses | cheaper between districts (for the same alteration spending), dearer within | about ±5% | volume markets are cheaper; busy quarters are dearer |
+| Relative house size | slightly cheaper | about −1% to −2% | fixed costs spread over more floor area |
+| Dwelling mix (apartments, townhouses, retirement) | none detected | under 1% | near zero in every model |
+
+**How well can we predict it?**
+
+* With the measured drivers and broad region only, the best models (random forest, XGBoost, SVM) explain about a
+  third of the variation in relative cost (CV R² ≈ 0.32). That is about as much as knowing the district name alone.
+* With the district added, ridge regression explains about 41% in cross-validation and predicts 2020–2026 within about
+  8% (MAPE), marginally better than each district's historical average.
+* Roughly four-fifths of the variation between district averages is not explained by our measured drivers. It sits in
+  location itself: land, terrain, local labour markets, and the kind of house each place builds.
+
+**Limitations.**
+
+* Our activity features are total dollars, so they partly measure district size. Per-resident versions (alterations
+  per resident, non-residential per resident) would be cleaner. Population estimates were not in this release.
+* We do not observe land prices, house quality or specification, or builder type, which are the most likely sources
+  of the unexplained location premium.
+* The data are observational. "Dearer where alteration spending is high" is an association, not a cause; both
+  probably reflect wealthier markets.
+* Relationships drifted after 2023 (section 6.1), so a model for current use should be retrained regularly.
+
+# Save final models
+
+For later use (an app or the poster), we refit the two chosen models on **all** modelled rows from 1996 to
+2026Q2. The test years have done their job, and the final models should learn from the most recent data. We
+also save the latest values of every feature for each district, which an app can use as default inputs, and the
+latest "rest of NZ" $/m², which turns a relative prediction back into dollars.
+
+```{r save-final}
+final_rf <- ranger(fml_of(Y, fsets$drivers), data = dat, num.trees = 500,
+                   mtry = b_rf$mtry, min.node.size = b_rf$min.node.size,
+                   num.threads = N_CORES, seed = 462)
+final_ridge <- fit_ridge(fsets$district, best$Ridge$district$lambda, data = dat)
+
+# latest four quarters for each district: average feature values and the rest-of-NZ $/m²
+latest <- dat |>
+  group_by(ta) |>
+  slice_max(t_index, n = 4) |>
+  summarise(region = first(region), is_city = first(is_city),
+            across(all_of(num_main), mean),
+            loo_cost_m2 = mean(loo_cost_m2), real_cost_m2 = mean(real_cost_m2),
+            last_quarter = max(as.character(yq)), .groups = "drop")
+
+saveRDS(list(rf_drivers = final_rf, ridge_district = final_ridge,
+             features = fsets, num_main = num_main, response = Y,
+             factor_levels = list(ta = levels(dat$ta), region = levels(dat$region)),
+             latest = latest, trained_on = "1996Q1-2026Q2, districts with >= 5 new houses"),
+        file.path(paths$models_rq1, "rq1_final_models.rds"))
+file.size(file.path(paths$models_rq1, "rq1_final_models.rds")) / 2^20   # MB
+```
+
+# Appendix: helper functions
+
+This notebook uses helper functions from `R/utils_data.R` and `R/utils_models.R`, printed here so the document is
+complete on its own.
+
+```{r appendix-utils-data, code = readLines(file.path(proj_root, "R", "utils_data.R")), eval = FALSE}
+```
+
+```{r appendix-utils-models, code = readLines(file.path(proj_root, "R", "utils_models.R")), eval = FALSE}
+```
+
+```{r session, include = FALSE}
+sessionInfo()
+```

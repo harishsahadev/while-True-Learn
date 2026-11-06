@@ -1,0 +1,1033 @@
+---
+title: "RQ1 Step 3: Fitting, tuning and comparing models"
+subtitle: "What drives the real cost per m² of new houses across districts?"
+author: "while True: learn(), Group 8, STAT462"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: show
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE,
+                      fig.align = "center", out.width = "85%")
+find_proj_root <- function(path = getwd()) {
+  path <- normalizePath(path)
+  repeat {
+    if (length(list.files(path, pattern = "\\.Rproj$"))) return(path)
+    parent <- dirname(path)
+    if (parent == path) stop("No .Rproj file found above ", getwd())
+    path <- parent
+  }
+}
+proj_root <- find_proj_root()
+knitr::opts_knit$set(root.dir = proj_root)
+
+# Caching: the slow chunks (marked cache = TRUE) are saved after the first knit and re-used on
+# later knits. A cached chunk re-runs if its own code changes, or if its "cache.extra" fingerprint
+# changes. We set that fingerprint from the input files here, and later (tune-helper, cv-table) from
+# the objects the cached chunks use, so a change anywhere upstream forces a re-run.
+file_md5 <- tools::md5sum(file.path(proj_root, c("data/processed/rq1_model_data.rds", "R/utils_models.R")))
+knitr::opts_chunk$set(cache.extra = file_md5)
+```
+
+```{r load}
+source(file.path(proj_root, "R", "utils_data.R"))
+source(file.path(proj_root, "R", "utils_models.R"))
+suppressPackageStartupMessages({
+  library(knitr)
+  library(glmnet)      # ridge / lasso / elastic net
+  library(mgcv)        # generalised additive models (smoothing splines)
+  library(rpart)       # regression tree
+  library(rpart.plot)  # drawing the tree
+  library(ranger)      # random forest (fast, multi-core)
+  library(xgboost)     # gradient-boosted trees
+  library(e1071)       # support vector machine
+})
+N_CORES <- max(1, parallel::detectCores() - 1)   # leave one core free for the computer
+dir.create(paths$models_rq1, showWarnings = FALSE, recursive = TRUE)
+
+rq1 <- readRDS(file.path(paths$processed, "rq1_model_data.rds"))
+
+dat <- rq1 |>
+  filter(year >= 1996,                                                   # EDA decision 7
+         !ta %in% c("Chatham Islands Territory", "Kawerau District")) |>  # too few rows, see 2.3
+  droplevels()
+
+train <- dat |> filter(split == "train")   # 1996Q1–2019Q4
+test  <- dat |> filter(split == "test")    # 2020Q1–2026Q2: NOT touched until section 13
+c(train = nrow(train), test = nrow(test), districts = nlevels(dat$ta))
+```
+
+# Purpose and plan
+
+Steps 1 and 2 gave us a clean table and a list of decisions. Step 3 fits models to it. We go **from the simplest
+model to the most flexible**. A complex model has to *earn* its place by beating the simpler ones on data it has
+not seen.
+
+| Order | Model | What it can capture | Settings tuned (hyperparameters) |
+|---|---|---|---|
+| 0 | Baselines: overall mean, district mean | Nothing / "each place has its own level" | none |
+| 1 | Linear regression (OLS) | Straight-line effects, added up | none |
+| 2 | Polynomial regression | Curved effects of each feature | degree |
+| 3 | Ridge, lasso, elastic net | Straight lines, with shrinkage / feature selection | penalty λ (α fixed per model) |
+| 4 | GAM (smoothing splines) | Any smooth curve per feature | smoothness (chosen automatically by REML) |
+| 5 | Regression tree | Thresholds and interactions, as one tree | complexity `cp`, `minbucket` |
+| 6 | Random forest | Many de-correlated trees, averaged | `mtry`, `min.node.size` |
+| 7 | XGBoost (boosted trees) | Trees added one by one, each fixing the last one's errors | `max_depth`, `min_child_weight`, number of rounds |
+| 8 | Support vector machine (radial) | Smooth non-linear surface in all features at once | `cost`, `gamma` |
+
+The pitch named linear, lasso, regression tree and random forest. The others were added because they cover gaps:
+polynomial and GAM test whether the effects are curved, XGBoost is the usual strongest method on tables like
+ours, and the SVM is a different, distance-based kind of model.
+
+**Ground rules**
+
+1. **Tuning happens on the training years only**, by time-ordered cross-validation (section 4).
+2. **The test years (2020–2026) are used once**, at the end (section 13), for every model at its tuned settings.
+   We do not go back and change anything after seeing the test scores.
+3. **The model is chosen on the cross-validation score**, not the test score. Picking by test score would make the
+   test score optimistic.
+
+# What goes into the models
+
+## Response (the label)
+
+The main response is **`rel_log_cost_m2`**: the log of a district's real $/m² *minus* the log of the real
+$/m² of all the *other* districts in the same quarter (Step 1, `relative` chunk). Step 2 showed why:
+
+* time explains about 41% of the variation in log real $/m², and the district only about 19%. A model of raw cost
+  would mostly learn "which year is it?";
+* the relative response removes the national level each quarter, which leaves the "across districts"
+  part of RQ1;
+* the shift from training to test is small for the relative response (mean −0.04 → −0.01), but large for raw
+  cost (+17%). So patterns learned before 2020 should still hold afterwards.
+
+A value of +0.10 means "about 10% dearer than the rest of NZ in that quarter" (strictly e^0.10^ − 1 = 10.5%).
+
+The **secondary response** `log_real_cost_m2` (the pitch's original target) is modelled in section 15. It is mainly
+there to show what happens when trees have to predict a price level they never saw.
+
+## Features (the predictors)
+
+```{r features}
+Y <- "rel_log_cost_m2"
+
+# numeric drivers (Step 1 built them; Step 2 kept them)
+num_main <- c("rel_house_m2",        # house size relative to other districts (log ratio)
+              "log_houses_n",        # how many new houses (log)
+              "multiunit_share",     # share of new dwellings that are not stand-alone houses
+              "apt_share",           # share that are apartments
+              "retire_share",        # share that are retirement-village units
+              "dwell_per_1000",      # new dwellings per 1000 residents (12 months)
+              "houses_yoy",          # growth in house numbers vs the same quarter last year (log)
+              "log_resid_alt_real",  # real $ of residential alterations (log)
+              "log_nonres_real")     # real $ of new non-residential building (log)
+
+# two feature sets
+fsets <- list(
+  drivers  = c(num_main, "region", "is_city"),  # measurable drivers + broad location
+  district = c(num_main, "ta")                  # measurable drivers + the district itself
+)
+
+tibble(feature = c(num_main, "region", "is_city", "ta"),
+       type    = map_chr(feature, \(v) class(train[[v]])[1]),
+       `in drivers set`  = feature %in% fsets$drivers,
+       `in district set` = feature %in% fsets$district) |>
+  kable(caption = "Features in each set")
+```
+
+**Why two feature sets?** RQ1 asks *what drives* cost. The district name is not a driver: it is a label that soaks
+up everything about a place that our measured features miss (land, terrain, local builders, consent rules).
+
+* The **drivers** set leaves the district name out. Whatever it explains has to come from measurable things.
+* The **district** set adds the name. The gap between the two sets shows how much of the location effect our
+  features *don't* explain.
+
+`region` and `is_city` are left out of the district set because the district already determines them. In a linear
+model they would be perfectly collinear and their coefficients could not be estimated.
+
+**Left out on purpose**
+
+* anything built from house *value* (leakage, Step 1);
+* lagged cost (a forecasting question, not an explanatory one; Step 2 decision 8);
+* island and season (no signal, Step 2 decision 3);
+* the time index (the relative response has no trend to follow);
+* `avg_house_m2`, which is replaced by `rel_house_m2` for the relative response (Step 2 decision 5).
+
+## Rows
+
+```{r rows}
+rq1 |> filter(year >= 1996) |>
+  filter(ta %in% c("Chatham Islands Territory", "Kawerau District")) |>
+  count(ta, split) |> kable(caption = "Rows dropped (1996 onwards)")
+colSums(is.na(train[c(num_main, "rel_log_cost_m2")]))   # expect all zero
+```
+
+**Observation.** From 1996 every feature is present, so nothing needs imputing. We drop **Chatham Islands** and
+**Kawerau**, which have only 1–2 modelled rows each. A district effect can't be learned from one row, and their
+names would appear in the test data but in no training fold (R stops with *"factor has new levels"*).
+
+# Compute check: will this fit on a laptop?
+
+```{r compute}
+design_district <- make_x(train, paste(fsets$district, collapse = " + "))
+tibble(object = c("all modelled rows (rq1)", "training rows", "design matrix, district set"),
+       rows   = c(nrow(rq1), nrow(train), nrow(design_district)),
+       columns = c(ncol(rq1), ncol(train), ncol(design_district)),
+       MB     = c(object.size(rq1), object.size(train), object.size(design_district)) / 2^20) |>
+  kable(digits = 2)
+ram_gb <- tryCatch(as.numeric(system("sysctl -n hw.memsize", intern = TRUE)) / 2^30,   # macOS only
+                   error = function(e) NA, warning = function(e) NA)
+c(cores_available = parallel::detectCores(), cores_used = N_CORES, RAM_GB = ram_gb)
+```
+
+**Observation.** The data takes a few megabytes. The machine has gigabytes. Memory is not a constraint. The
+heaviest object will be a 500-tree random forest (tens of MB). The real cost is *time*: every tuning setting is
+fitted four times (one per fold). That's why the slow chunks are cached, and why `ranger` and `xgboost` use several
+cores.
+
+# How models are compared fairly
+
+## Metrics
+
+All errors are on the **log scale**, where an error of 0.10 ≈ 10% of $/m².
+
+* **RMSE** (root mean squared error): penalises big misses. It is the main score.
+* **MAE** (mean absolute error): the typical miss.
+* **R²**: share of the variation explained. 0 = no better than predicting the average; 1 = perfect.
+* **MAPE** on $/m² (test only): the pitch's metric. Predicted $/m² = e^prediction^ × (the other districts'
+  $/m² that quarter).
+
+## Time-ordered cross-validation
+
+Tuning needs a score for each candidate setting, computed on data the model did not train on. We can't use the test
+set for this (ground rule 2). Ordinary random k-fold CV would mix 2018 rows into training when validating on 2014,
+which lets the model see the future. We use **forward-chaining** folds instead: train on every year before a block,
+validate on the block.
+
+```{r folds, fig.height = 2.6}
+folds <- make_time_folds(train$year)
+
+fold_plot <- imap_dfr(folds, \(f, nm) bind_rows(
+  tibble(fold = nm, year = unique(train$year[f$train]), role = "train"),
+  tibble(fold = nm, year = unique(train$year[f$valid]), role = "validate")))
+
+p_folds <- ggplot(fold_plot, aes(year, fct_rev(fold), fill = role)) +
+  geom_tile(colour = "white", height = 0.8) +
+  scale_fill_manual(values = c(train = "#9ecae1", validate = "#e6550d")) +
+  labs(title = "Forward-chaining cross-validation folds (training years only)",
+       x = NULL, y = NULL, fill = NULL)
+save_fig(p_folds, "fig15_cv_folds", height = 2.6)
+
+sapply(folds, \(f) c(train_rows = length(f$train), valid_rows = length(f$valid)))
+```
+
+**Observation.** There are four folds, each validating on two years (about 470 rows) after training on 3,800–5,200
+rows. The last fold (train 1996–2017, validate 2018–19) is closest to the real task. The **CV score** of a setting
+is its average RMSE over the four folds. Its spread across folds gives a standard error.
+
+## How tuning works, and the one-standard-error rule
+
+For each model, `cv_tune()` (in `R/utils_models.R`) does the following:
+
+1. for every row of a grid of settings and every fold, fit on the fold's training rows and predict its validation
+   rows;
+2. average the validation RMSE over folds;
+3. return the setting with the lowest average.
+
+**Choosing between models** uses the **one-standard-error rule**: take the lowest CV RMSE, add one standard error,
+and choose the *simplest* model under that line. Differences smaller than the fold-to-fold noise are not worth
+the extra complexity or the lost interpretability.
+
+Every model below is written as a small "factory": `fp_x(vars, y)` returns a function that fits on one data set
+and predicts another. `tune_model()` runs it on both feature sets.
+
+```{r tune-helper}
+rhs_of <- function(vars) paste(vars, collapse = " + ")
+fml_of <- function(y, vars) as.formula(paste(y, "~", rhs_of(vars)))
+is_num <- function(v) is.numeric(train[[v]])
+
+tune_model <- function(factory, grid = NULL, inner = NULL, sets = fsets, y = Y) {
+  imap(sets, \(vars, nm) timed(cv_tune(factory(vars, y), grid, train, folds, y, inner)))
+}
+
+# fingerprint of everything the cached tuning chunks depend on (if any of it changes, they re-run)
+knitr::opts_chunk$set(cache.extra = list(file_md5, rlang::hash(list(train, folds, fsets, Y, N_CORES))))
+```
+
+# Baselines
+
+**What they are.** The *overall mean* predicts the training average for every row. The *district mean* predicts
+each district's own training average (the baseline Step 2 chose). Any useful model must beat the district mean;
+otherwise "it's Queenstown, so it's dear" would be all we've learned.
+
+```{r baselines}
+fp_mean <- function(vars, y) function(tr, nw, p) rep(mean(tr[[y]]), nrow(nw))
+
+fp_district_mean <- function(vars, y) function(tr, nw, p) {
+  m   <- tapply(tr[[y]], tr$ta, mean)        # one average per district
+  out <- unname(m[as.character(nw$ta)])
+  ifelse(is.na(out), mean(tr[[y]]), out)     # a district never seen gets the overall mean
+}
+
+res_mean     <- tune_model(fp_mean,          sets = list(none = character(0)))
+res_distmean <- tune_model(fp_district_mean, sets = list(none = character(0)))
+bind_rows(summarise_tuning(res_mean, "Overall mean"),
+          summarise_tuning(res_distmean, "District mean")) |>
+  select(model, cv_rmse, cv_rmse_se, cv_mae, cv_r2) |> kable(digits = 4)
+```
+
+**Observation.** The overall mean misses by about `r round(res_mean$none$best$cv_rmse, 3)` on the log scale (≈
+`r round(100 * res_mean$none$best$cv_rmse)`%). Knowing only the district cuts this to
+`r round(res_distmean$none$best$cv_rmse, 3)` (CV R² = `r round(res_distmean$none$best$cv_r2, 2)`). That is a strong
+baseline: Step 2 showed that districts keep their rank for decades. **This is the number to beat.**
+
+# Linear regression (OLS)
+
+**What it is.** *Ordinary least squares*. Prediction = intercept + b₁·x₁ + b₂·x₂ + …. The coefficients b are chosen
+to minimise the sum of squared errors. Each coefficient is the change in the response for a one-unit change in that
+feature, *holding the others fixed*. There is nothing to tune.
+
+**Assumptions.** Effects are straight lines and add up. Errors have constant spread. For valid p-values, rows must
+also be independent. Our rows are not (the same district appears quarter after quarter), so we use OLS for
+*prediction and description*, not for formal significance tests.
+
+```{r ols}
+fp_ols <- function(vars, y) function(tr, nw, p) predict(lm(fml_of(y, vars), data = tr), newdata = nw)
+res_ols <- tune_model(fp_ols)
+summarise_tuning(res_ols, "Linear regression") |> select(set, cv_rmse, cv_rmse_se, cv_r2) |> kable(digits = 4)
+
+# coefficients of the drivers model fitted on all training rows (numeric features standardised so sizes compare)
+ols_std <- lm(fml_of(Y, fsets$drivers),
+              data = train |> mutate(across(all_of(num_main), \(x) as.numeric(scale(x)))))
+broom_like <- summary(ols_std)$coefficients
+tibble(term = rownames(broom_like), estimate = broom_like[, 1], std_error = broom_like[, 2]) |>
+  filter(term %in% num_main | term == "is_cityTRUE") |>
+  arrange(desc(abs(estimate))) |>
+  kable(digits = 4, caption = "OLS, drivers set: effect of a 1-SD change in each feature (log points)")
+```
+
+**Observation.** OLS on the drivers alone (CV RMSE `r round(res_ols$drivers$best$cv_rmse, 4)`, R²
+`r round(res_ols$drivers$best$cv_r2, 2)`) beats the overall mean, but **not** the district mean. With the district added
+(`r round(res_ols$district$best$cv_rmse, 4)`, R² `r round(res_ols$district$best$cv_r2, 2)`) it beats both: the drivers
+explain *changes* within a district that the district average can't. In the standardised coefficients, a positive
+estimate means "districts with more of this feature are dearer, other features held equal". Alteration spending and
+dwellings per 1,000 residents are positive; the number of new houses and relative house size are negative. Because the activity measures overlap (VIF up to ~6 in Step 2),
+individual coefficients can swap size or even sign between similar models. Treat them as a description, not a
+causal effect.
+
+# Polynomial regression
+
+**What it is.** Still a linear model, but each numeric feature x is also given x², x³, … as extra columns, so its
+effect can bend. `poly(x, d)` builds *orthogonal* polynomials, which carry the same information as x, x², … but
+are uncorrelated with each other, so the fit is numerically stable. **Tuned:** the degree d (1 = plain OLS).
+
+**Risk.** High-degree polynomials swing wildly beyond the range of the training data. That matters when the test
+years bring feature values never seen before.
+
+```{r poly, cache = TRUE}
+fp_poly <- function(vars, y) function(tr, nw, p) {
+  terms <- map_chr(vars, \(v) if (is_num(v)) sprintf("poly(%s, %d)", v, p$degree) else v)
+  predict(lm(as.formula(paste(y, "~", paste(terms, collapse = " + "))), data = tr), newdata = nw)
+}
+res_poly <- tune_model(fp_poly, grid = tibble(degree = 1:3))
+res_poly$drivers$summary |> select(degree, cv_rmse, cv_rmse_sd, cv_r2) |> kable(digits = 4, caption = "Drivers set")
+summarise_tuning(res_poly, "Polynomial regression") |> select(set, best_settings, cv_rmse, cv_r2) |> kable(digits = 4)
+```
+
+**Observation.** For the drivers set, degree `r res_poly$drivers$best$degree` is best, but only slightly better
+than straight lines (`r round(res_poly$drivers$best$cv_rmse, 4)` vs `r round(res_ols$drivers$best$cv_rmse, 4)`). For the
+district set, degree `r res_poly$district$best$degree` wins, so plain OLS. The relationships bend a little but are
+close to linear.
+
+# Ridge, lasso and elastic net (regularised regression)
+
+**What they are.** OLS with a **penalty** on the size of the coefficients:
+
+$$\min_b \; \sum (y - Xb)^2 / 2n \;+\; \lambda \left[ \tfrac{1-\alpha}{2}\sum b_j^2 + \alpha \sum |b_j| \right]$$
+
+* **Ridge** (α = 0) shrinks all coefficients towards zero. It helps when features overlap (our VIFs).
+* **Lasso** (α = 1) can shrink coefficients *exactly* to zero, which drops features. That makes it a feature
+  selector.
+* **Elastic net** (α = 0.5) sits between the two.
+
+**Tuned:** λ, the penalty strength. λ = 0 is plain OLS; a large λ shrinks everything to zero. One `glmnet` fit
+gives predictions for a whole sequence of λ values at once, so CV scores 100 λ values almost for free (that's the
+"inner" setting in `cv_tune`). `glmnet` standardises the features internally, so the penalty treats them all alike.
+
+```{r glmnet, cache = TRUE}
+lambda_grid <- 10^seq(1, -6, length.out = 100)
+
+fp_glmnet <- function(vars, y) function(tr, nw, p) {
+  rhs <- rhs_of(vars)
+  fit <- glmnet(make_x(tr, rhs), tr[[y]], alpha = p$alpha, lambda = lambda_grid)
+  pred <- predict(fit, make_x(nw, rhs))
+  colnames(pred) <- fit$lambda
+  pred
+}
+res_ridge <- tune_model(fp_glmnet, grid = tibble(alpha = 0),   inner = "lambda")
+res_enet  <- tune_model(fp_glmnet, grid = tibble(alpha = 0.5), inner = "lambda")
+res_lasso <- tune_model(fp_glmnet, grid = tibble(alpha = 1),   inner = "lambda")
+
+bind_rows(summarise_tuning(res_ridge, "Ridge"), summarise_tuning(res_enet, "Elastic net"),
+          summarise_tuning(res_lasso, "Lasso")) |>
+  select(model, set, best_settings, cv_rmse, cv_r2) |> kable(digits = 4)
+```
+
+```{r lasso-curve, fig.height = 3.6}
+lasso_curve <- imap_dfr(res_lasso, \(r, set) r$summary |> mutate(set = set))
+p_lasso <- ggplot(lasso_curve, aes(log10(lambda), cv_rmse, colour = set)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(data = lasso_curve |> group_by(set) |> slice_min(cv_rmse, n = 1), size = 2.5) +
+  scale_colour_manual(values = c(drivers = "#2a6f97", district = "#e76f51")) +
+  labs(title = "Lasso: cross-validated error against penalty strength",
+       subtitle = "Right = stronger penalty (fewer features). Dot = best λ.",
+       x = expression(log[10](lambda)), y = "CV RMSE (log scale)", colour = "Feature set")
+save_fig(p_lasso, "fig16_lasso_cv_curve", height = 3.6)
+```
+
+**Observation.** The curve is flat at small λ (≈ OLS), dips slightly at a small penalty, then rises steeply once
+the penalty starts removing useful features. Results by feature set:
+
+* **Drivers set** (~25 columns after dummies): the best penalty improves CV RMSE only from
+  `r round(res_ols$drivers$best$cv_rmse, 4)` to `r round(res_lasso$drivers$best$cv_rmse, 4)`, which is within one standard
+  error. With 5,000 rows OLS is not over-fitting much.
+* **District set** (~74 columns): the gain is larger (`r round(res_ols$district$best$cv_rmse, 4)` →
+  `r round(res_lasso$district$best$cv_rmse, 4)`). The penalty pulls the noisy effects of small districts towards the
+  average. Shrinkage is designed for this situation.
+
+Ridge, elastic net and lasso end up almost identical.
+
+# Generalised additive model (GAM)
+
+**What it is.** prediction = intercept + f₁(x₁) + f₂(x₂) + …, where each fₖ is a smooth curve (a penalised
+regression spline) instead of a straight line or polynomial. It sits between polynomial regression (curves) and
+OLS (interpretable, additive).
+
+**Tuned:** how wiggly each curve may be. `mgcv` chooses this itself by **REML**, which balances fit against
+smoothness inside a single fit, so there is no grid. `k = 6` caps each curve at 6 basis functions.
+
+```{r gam, cache = TRUE}
+fp_gam <- function(vars, y) function(tr, nw, p) {
+  terms <- map_chr(vars, \(v) if (is_num(v)) sprintf("s(%s, k = 6)", v) else v)
+  fit <- gam(as.formula(paste(y, "~", paste(terms, collapse = " + "))), data = tr, method = "REML")
+  as.numeric(predict(fit, newdata = nw))
+}
+res_gam <- tune_model(fp_gam)
+summarise_tuning(res_gam, "GAM (splines)") |> select(set, cv_rmse, cv_r2, seconds) |> kable(digits = 4)
+```
+
+**Observation.** The GAM does about as well as degree-2 polynomials (`r round(res_gam$drivers$best$cv_rmse, 4)`),
+which confirms that effects bend a little. Smooth curves, one feature at a time, do not close the gap to the
+tree ensembles below. That suggests the missing ingredient is *interactions* between features, not curvature.
+
+# Regression tree
+
+**What it is.** The tree repeatedly splits the rows on one feature at a threshold and predicts the average of each
+final group. It captures thresholds and interactions and is easy to read, but a single tree is unstable: small
+changes in the data can change the splits.
+
+**Tuned:**
+
+* `cp`: the complexity parameter. A split is kept only if it improves fit by at least `cp` × the starting error.
+  A small `cp` gives a big tree.
+* `minbucket`: the smallest allowed leaf.
+
+`xval = 0` turns off rpart's own random CV because we use our time-ordered folds instead.
+
+```{r tree, cache = TRUE}
+fp_tree <- function(vars, y) function(tr, nw, p)
+  predict(rpart(fml_of(y, vars), data = tr,
+                control = rpart.control(cp = p$cp, minbucket = p$minbucket, xval = 0)), newdata = nw)
+
+res_tree <- tune_model(fp_tree, grid = expand_grid(cp = c(0.0005, 0.001, 0.002, 0.005, 0.01, 0.02),
+                                                   minbucket = c(10, 30, 60)))
+summarise_tuning(res_tree, "Regression tree") |> select(set, best_settings, cv_rmse, cv_r2) |> kable(digits = 4)
+```
+
+```{r tree-plot, fig.height = 5.5, out.width = "100%"}
+best_tree <- res_tree$drivers$best
+# short region names so the split labels fit on the page
+short_region <- function(r) r |> str_remove(" Region") |>
+  str_replace_all(c("Manawatu-Whanganui" = "Manawatu", "Bay of Plenty" = "BoP", "Hawke's Bay" = "HawkesBay",
+                    "West Coast" = "WestCoast", "Marlborough" = "Marlb", "Canterbury" = "Canterb",
+                    "Northland" = "Northl", "Southland" = "Southl", "Wellington" = "Wgtn"))
+train_tree <- train |> mutate(region = fct_relabel(region, short_region))
+tree_fit  <- rpart(fml_of(Y, fsets$drivers), data = train_tree,
+                   control = rpart.control(cp = max(best_tree$cp, 0.005), minbucket = best_tree$minbucket, xval = 0))
+draw_tree <- function() rpart.plot(tree_fit, type = 2, extra = 101, under = TRUE, roundint = FALSE,
+                                   box.palette = "BuRd", tweak = 1.0, split.cex = 0.9,
+                                   main = "Regression tree, drivers set (pruned for display; red = dearer)")
+png(file.path(paths$fig_rq1, "fig17_regression_tree.png"), width = 11, height = 6, units = "in", res = 200)
+draw_tree(); invisible(dev.off())
+draw_tree()
+```
+
+**Observation.** The plotted tree is pruned a bit harder than the tuned one (`cp` ≥ 0.005) so it can be read.
+Each box shows the mean relative cost, the number of rows and their share. How to read it:
+
+* The **first split is on residential alteration spending**: districts that spend more on renovations are dearer
+  for new houses too.
+* Then **region** separates the cheaper provincial regions.
+* Then **dwellings per 1,000 residents** (fast-growing places) splits again.
+* The dearest leaf (≈ +0.19, about 20% above the rest of NZ, 73 rows) is high-alteration, high-growth
+  district-quarters in the regions *not* in the listed group (Auckland, Wellington, Otago, Gisborne, Hawke's Bay,
+  West Coast). In practice it is mostly Queenstown-Lakes.
+
+The tuned tree (CV RMSE `r round(res_tree$drivers$best$cv_rmse, 4)`) is about as accurate as OLS. One tree is too
+coarse to beat smoother models, but it shows the drivers *interacting*: the effect of growth depends on the region.
+
+# Random forest
+
+**What it is.** Hundreds of deep trees, each grown on a bootstrap sample of the rows. At each split only a random
+subset of `mtry` features may be considered. Averaging many different trees removes most of a single tree's
+instability.
+
+**Tuned:**
+
+* `mtry`: features tried at each split. Small values give more varied trees; `mtry` = all features is "bagging".
+* `min.node.size`: the smallest leaf. Larger values give smoother predictions.
+
+The number of trees (500) is not really a tuning setting: more trees never hurt, they just take longer, and 500 is
+plenty here.
+
+```{r rf, cache = TRUE}
+fp_rf <- function(vars, y) function(tr, nw, p)
+  predict(ranger(fml_of(y, vars), data = tr, num.trees = 500,
+                 mtry = min(p$mtry, length(vars)), min.node.size = p$min.node.size,
+                 num.threads = N_CORES, seed = 462), data = nw)$predictions
+
+res_rf <- tune_model(fp_rf, grid = expand_grid(mtry = c(2, 4, 6, 8, 10), min.node.size = c(5, 20, 50)))
+summarise_tuning(res_rf, "Random forest") |> select(set, best_settings, cv_rmse, cv_r2, seconds) |> kable(digits = 4)
+res_rf$drivers$summary |> select(mtry, min.node.size, cv_rmse) |>
+  pivot_wider(names_from = min.node.size, values_from = cv_rmse, names_prefix = "min.node.size = ") |>
+  arrange(mtry) |> kable(digits = 4, caption = "Drivers set: CV RMSE over the grid")
+```
+
+**Observation.** On the drivers set the random forest (`r round(res_rf$drivers$best$cv_rmse, 4)`, R²
+`r round(res_rf$drivers$best$cv_r2, 2)`) clearly beats every linear model. The grid surface is fairly flat, so the
+forest isn't sensitive to its exact settings, which is typical. Adding the district barely helps the forest
+(`r round(res_rf$district$best$cv_rmse, 4)`), and in that set it falls behind the linear models. Trees handle a
+65-level category poorly: the district information gets spread across many small, noisy splits. A linear model
+gives each district its own intercept directly.
+
+# XGBoost (gradient-boosted trees)
+
+**What it is.** Small trees are built one after another, each fitted to the errors left by the previous ones, and
+only a fraction `eta` (the learning rate) of each is added. A forest averages independent trees; boosting adds
+dependent ones.
+
+**Tuned:**
+
+* `max_depth`: how many splits deep each tree may go (its order of interactions).
+* `min_child_weight`: the minimum size of a leaf.
+* `nrounds`: how many trees. Too few under-fits; too many over-fits. As with λ for the lasso, one fit of 3,000
+  rounds lets us score every round count from 25 to 3,000 at no extra cost. The range goes up to 3,000 so that the
+  chosen number of rounds is not at the edge of what we tried.
+
+Fixed:
+
+* `eta` = 0.03 (a slow, safe learning rate);
+* `subsample` = `colsample_bytree` = 0.8 (each tree sees 80% of rows and features, which adds randomness like a
+  forest).
+
+```{r xgb, cache = TRUE}
+xgb_checkpoints <- seq(25, 3000, by = 25)
+
+fp_xgb <- function(vars, y) function(tr, nw, p) {
+  rhs <- rhs_of(vars)
+  set.seed(462)
+  booster <- xgb.train(
+    params = list(objective = "reg:squarederror", eta = 0.03,
+                  max_depth = p$max_depth, min_child_weight = p$min_child_weight,
+                  subsample = 0.8, colsample_bytree = 0.8, nthread = N_CORES),
+    data = xgb.DMatrix(make_x(tr, rhs), label = tr[[y]]),
+    nrounds = max(xgb_checkpoints), verbose = 0)
+  new_x <- xgb.DMatrix(make_x(nw, rhs))
+  pred  <- sapply(xgb_checkpoints, \(k) predict(booster, new_x, iterationrange = c(1, k)))
+  colnames(pred) <- xgb_checkpoints
+  pred
+}
+res_xgb <- tune_model(fp_xgb, grid = expand_grid(max_depth = c(2, 4, 6, 8), min_child_weight = c(1, 10)),
+                      inner = "nrounds")
+summarise_tuning(res_xgb, "XGBoost") |> select(set, best_settings, cv_rmse, cv_r2, seconds) |> kable(digits = 4)
+```
+
+```{r xgb-curve, fig.height = 3.6}
+xgb_curve <- res_xgb$drivers$summary |>
+  mutate(setting = paste0("depth ", max_depth, ", min_child_weight ", min_child_weight))
+p_xgb <- ggplot(xgb_curve, aes(nrounds, cv_rmse, colour = setting)) +
+  geom_line() +
+  coord_cartesian(ylim = c(min(xgb_curve$cv_rmse) - 0.001, min(xgb_curve$cv_rmse) + 0.01)) +
+  labs(title = "XGBoost (drivers set): CV error as trees are added",
+       subtitle = "Error falls, flattens, then creeps up as later trees start fitting noise",
+       x = "Number of boosting rounds (trees)", y = "CV RMSE (log scale)", colour = NULL) +
+  theme(legend.position = "right")
+save_fig(p_xgb, "fig18_xgb_rounds", height = 3.6, width = 8)
+```
+
+**Observation.** The curves show the bias–variance trade-off:
+
+* Deeper trees reach their best after a few hundred rounds and then get worse (over-fitting).
+* Depth-2 trees learn slowly and keep improving for longer.
+* The best settings sit in a broad, flat valley, so the exact choice matters little.
+
+On the drivers set XGBoost (`r round(res_xgb$drivers$best$cv_rmse, 4)`) is level with the random forest. On the
+district set it prefers very shallow trees (depth `r res_xgb$district$best$max_depth`, `r res_xgb$district$best$nrounds`
+rounds). Shallow trees add up to something close to an additive model, which is what the linear models are telling us
+too.
+
+# Support vector machine (SVM) regression
+
+**What it is.** With a radial kernel, the SVM predicts each row mainly from the training rows closest to it in
+feature space. Errors smaller than ε are ignored and larger ones are penalised with weight `cost`. Features are
+standardised first (`scale = TRUE`), because distances are meaningless when features have different units.
+
+**Tuned:**
+
+* `gamma` (γ): how local the influence of each training row is. A large γ gives a very wiggly fit.
+* `cost`: how hard the model tries to fit every point. A large cost gives less smoothing.
+
+ε is fixed at 0.05 (≈ 5% on the log scale).
+
+```{r svm, cache = TRUE}
+fp_svm <- function(vars, y) function(tr, nw, p) {
+  rhs <- rhs_of(vars)
+  fit <- svm(make_x(tr, rhs), tr[[y]], type = "eps-regression", kernel = "radial",
+             cost = p$cost, gamma = p$gamma, epsilon = 0.05, scale = TRUE)
+  as.numeric(predict(fit, make_x(nw, rhs)))
+}
+res_svm <- tune_model(fp_svm, grid = expand_grid(cost = c(0.3, 1, 3), gamma = c(0.002, 0.005, 0.01, 0.03, 0.1)))
+summarise_tuning(res_svm, "SVM (radial)") |> select(set, best_settings, cv_rmse, cv_r2, seconds) |> kable(digits = 4)
+```
+
+**Observation.** The SVM is best or joint-best on the drivers set (`r round(res_svm$drivers$best$cv_rmse, 4)`) and
+close to the best on the district set (`r round(res_svm$district$best$cv_rmse, 4)`). It is the slowest to tune
+(`r round(attr(res_svm$district, "seconds"))` s for the district set). Its predictions can't be broken down by
+feature, so it is the hardest of the models to explain. The district set prefers a small γ, i.e. a smooth,
+nearly linear surface, again pointing to mostly additive effects once location is known.
+
+# Cross-validation comparison of all models
+
+```{r cv-table}
+model_order <- c("Overall mean", "District mean", "Linear regression", "Polynomial regression", "Ridge",
+                 "Elastic net", "Lasso", "GAM (splines)", "Regression tree", "Random forest", "XGBoost",
+                 "SVM (radial)")
+
+# every model's tuning result, its factory, and its inner setting (if any)
+spec <- list(
+  "Overall mean"          = list(res = res_mean,     fp = fp_mean),
+  "District mean"         = list(res = res_distmean, fp = fp_district_mean),
+  "Linear regression"     = list(res = res_ols,      fp = fp_ols),
+  "Polynomial regression" = list(res = res_poly,     fp = fp_poly),
+  "Ridge"                 = list(res = res_ridge,    fp = fp_glmnet, inner = "lambda"),
+  "Elastic net"           = list(res = res_enet,     fp = fp_glmnet, inner = "lambda"),
+  "Lasso"                 = list(res = res_lasso,    fp = fp_glmnet, inner = "lambda"),
+  "GAM (splines)"         = list(res = res_gam,      fp = fp_gam),
+  "Regression tree"       = list(res = res_tree,     fp = fp_tree),
+  "Random forest"         = list(res = res_rf,       fp = fp_rf),
+  "XGBoost"               = list(res = res_xgb,      fp = fp_xgb, inner = "nrounds"),
+  "SVM (radial)"          = list(res = res_svm,      fp = fp_svm)
+)
+
+cv_all <- imap_dfr(spec, \(s, m) summarise_tuning(s$res, m)) |>
+  mutate(model = factor(model, levels = model_order),
+         set = factor(set, levels = c("none", "drivers", "district"))) |>
+  arrange(set, model)
+cvv <- function(m, s, col = "cv_rmse") cv_all[[col]][cv_all$model == m & cv_all$set == s]   # for inline text
+# later cached chunks (test, importance, real response) also depend on the tuning results
+knitr::opts_chunk$set(cache.extra = list(file_md5, rlang::hash(list(train, test, folds, fsets, Y, cv_all))))
+save_tab(cv_all, "t08_cv_results") |>
+  select(set, model, best_settings, cv_rmse, cv_rmse_se, cv_mae, cv_r2, seconds) |>
+  kable(digits = 4, caption = "Cross-validation results (training years only), best setting of each model")
+```
+
+```{r cv-plot, fig.height = 4.6}
+cv_plot_df <- bind_rows(
+  cv_all |> filter(set != "none"),
+  cv_all |> filter(set == "none") |> mutate(set = "drivers"),
+  cv_all |> filter(set == "none") |> mutate(set = "district")) |>
+  mutate(set = factor(set, levels = c("drivers", "district"),
+                      labels = c("Drivers only", "Drivers + district")))
+
+p_cv <- ggplot(cv_plot_df, aes(cv_rmse, fct_rev(model))) +
+  geom_linerange(aes(xmin = cv_rmse - cv_rmse_se, xmax = cv_rmse + cv_rmse_se), colour = "grey50") +
+  geom_point(aes(colour = model %in% c("Overall mean", "District mean")), size = 2.4, show.legend = FALSE) +
+  geom_vline(data = cv_plot_df |> filter(model == "District mean"), aes(xintercept = cv_rmse),
+             linetype = 2, colour = "#e76f51") +
+  scale_colour_manual(values = c(`TRUE` = "#e76f51", `FALSE` = "#2a6f97")) +
+  facet_wrap(~set) +
+  labs(title = "Cross-validated error of every model (lower is better)",
+       subtitle = "Point = mean over 4 time-ordered folds; bar = ±1 standard error; dashed = district-mean baseline",
+       x = "CV RMSE (log scale, ≈ proportional error)", y = NULL)
+save_fig(p_cv, "fig19_cv_comparison", height = 4.6, width = 8)
+```
+
+```{r one-se}
+one_se <- cv_all |>
+  filter(set != "none") |>
+  group_by(set) |>
+  mutate(best_rmse = min(cv_rmse),
+         threshold = best_rmse + cv_rmse_se[which.min(cv_rmse)],
+         within_1se = cv_rmse <= threshold) |>
+  ungroup()
+
+chosen <- one_se |> filter(within_1se) |> group_by(set) |> arrange(model) |> slice(1) |> ungroup()
+one_se |> filter(within_1se) |> select(set, model, cv_rmse, threshold) |>
+  kable(digits = 4, caption = "Models within one standard error of the best (listed simplest first)")
+chosen |> select(set, model, best_settings, cv_rmse)  |> kable(digits = 4, caption = "Chosen by the 1-SE rule")
+```
+
+**Observation.** Three findings.
+
+1. **Drivers only.** The flexible models form the top group:
+   * random forest `r round(cvv("Random forest", "drivers"), 4)`;
+   * XGBoost `r round(cvv("XGBoost", "drivers"), 4)`;
+   * SVM `r round(cvv("SVM (radial)", "drivers"), 4)`.
+
+   They are ahead of the whole linear family (`r round(cvv("Lasso", "drivers"), 4)`–`r round(cvv("Linear regression", "drivers"), 4)`).
+   They explain about a third of the variation in relative cost (CV R² ≈ `r round(cvv("SVM (radial)", "drivers", "cv_r2"), 2)`),
+   versus about a quarter for the linear models. The measured drivers matter in a non-linear, interacting way.
+   **But no drivers-only model clearly beats the district-mean baseline** (`r round(cvv("District mean", "none"), 4)`).
+   Our measured features recover about as much as simply knowing the district, and no more.
+2. **Drivers + district.** Here the order flips: the **penalised linear models are best**
+   (lasso `r round(cvv("Lasso", "district"), 4)`, R² `r round(cvv("Lasso", "district", "cv_r2"), 2)`). Forests and single
+   trees fall behind. Once each district has its own level, what is left is mostly additive and close to linear.
+   These models beat the district-mean baseline by about
+   `r fmt_pct(1 - cvv("Lasso", "district") / cvv("District mean", "none"), 0)` in RMSE. The drivers explain movements
+   *around* each district's usual level.
+3. **The 1-SE rule** picks **`r chosen$model[chosen$set == "drivers"]`** for the drivers set and
+   **`r chosen$model[chosen$set == "district"]`** for the district set. These are the models we carry forward, but
+   we still report every model on the test set.
+
+# Final evaluation on the test years (2020–2026)
+
+Each model is refitted at its tuned settings on **all** 1996–2019 training rows, then scored once on the 1,600 test
+rows.
+
+```{r test-eval, cache = TRUE}
+test_pred <- imap_dfr(spec, function(s, m) {
+  sets <- if (m %in% c("Overall mean", "District mean")) list(none = character(0)) else fsets
+  preds <- refit_predict(s$fp, s$res, sets, Y, train, test, inner = s$inner)
+  imap_dfr(preds, \(p, set) tibble(model = m, set = set, row = seq_along(p), pred = p))
+})
+```
+
+```{r test-table}
+test_long <- test_pred |>
+  left_join(test |> mutate(row = row_number()) |>
+              select(row, ta, yq, year, obs = all_of(Y), loo_cost_m2, real_cost_m2), by = "row") |>
+  mutate(pred_dollars = exp(pred) * loo_cost_m2)
+
+test_res <- test_long |>
+  group_by(model, set) |>
+  summarise(reg_metrics(obs, pred), mape = mape(real_cost_m2, pred_dollars), .groups = "drop") |>
+  left_join(cv_all |> select(model, set, cv_rmse), by = c("model", "set")) |>
+  mutate(model = factor(model, levels = model_order),
+         set = factor(set, levels = c("none", "drivers", "district"))) |>
+  arrange(set, model) |>
+  rename(test_rmse = rmse, test_mae = mae, test_r2 = r2, test_mape = mape)
+tv <- function(m, s, col = "test_rmse") test_res[[col]][test_res$model == m & test_res$set == s]   # for inline text
+save_tab(test_res, "t09_test_results") |>
+  kable(digits = 4, caption = "Test-period scores (2020Q1–2026Q2). MAPE is on real $/m².")
+```
+
+```{r cv-vs-test, fig.height = 4.6}
+cvtest_df <- bind_rows(
+  test_res |> filter(set != "none"),
+  test_res |> filter(set == "none") |> mutate(set = "drivers"),
+  test_res |> filter(set == "none") |> mutate(set = "district")) |>
+  mutate(set = factor(as.character(set), levels = c("drivers", "district"),
+                      labels = c("Drivers only", "Drivers + district"))) |>
+  pivot_longer(c(cv_rmse, test_rmse), names_to = "score", values_to = "rmse") |>
+  mutate(score = recode(score, cv_rmse = "CV (1996–2019)", test_rmse = "Test (2020–2026)"))
+
+p_cvtest <- ggplot(cvtest_df, aes(rmse, fct_rev(model))) +
+  geom_line(aes(group = model), colour = "grey75") +
+  geom_point(aes(colour = score), size = 2.3) +
+  geom_vline(data = cvtest_df |> filter(model == "District mean", score == "Test (2020–2026)"),
+             aes(xintercept = rmse), linetype = 2, colour = "#e76f51") +
+  scale_colour_manual(values = c("CV (1996–2019)" = "grey55", "Test (2020–2026)" = "#2a6f97")) +
+  facet_wrap(~set) +
+  labs(title = "Cross-validation vs test error for every model",
+       subtitle = "Dashed = district-mean baseline on the test years. Every model is worse after 2020.",
+       x = "RMSE (log scale)", y = NULL, colour = NULL) +
+  theme(legend.position = "bottom")
+save_fig(p_cvtest, "fig20_cv_vs_test", height = 4.6, width = 8)
+```
+
+```{r pred-vs-actual, fig.height = 4}
+chosen_pred <- test_long |> semi_join(chosen |> mutate(model = as.character(model), set = as.character(set)),
+                                      by = c("model", "set")) |>
+  mutate(panel = paste0(model, " (", set, " set)"))
+p_pva <- ggplot(chosen_pred, aes(pred, obs)) +
+  geom_abline(slope = 1, intercept = 0, colour = "grey50", linetype = 2) +
+  geom_point(alpha = 0.35, size = 1, colour = "#2a6f97") +
+  geom_smooth(method = "lm", se = FALSE, colour = "#e76f51", linewidth = 0.7) +
+  facet_wrap(~panel) +
+  labs(title = "Chosen models on the test years: predicted vs actual relative cost",
+       x = "Predicted (log ratio to rest of NZ)", y = "Actual")
+save_fig(p_pva, "fig21_test_pred_vs_actual", height = 4, width = 8)
+```
+
+**Observation.** Five points.
+
+1. **Every model is worse on 2020–26 than in CV, including the overall mean**
+   (`r round(tv("Overall mean", "none"), 3)` vs `r round(cvv("Overall mean", "none"), 3)`). So part of this is not the
+   models' fault: districts were simply *more spread out* relative to each other in the COVID / boom / bust years.
+   R² adjusts for this, and the R² values are close to the CV ones.
+2. **The district set beats the drivers set again.** The best district-set model reaches test RMSE
+   `r round(min(test_res$test_rmse[test_res$set == "district"]), 4)` (R²
+   ≈ `r round(max(test_res$test_r2[test_res$set == "district"]), 2)`). The best drivers-only model reaches
+   `r round(min(test_res$test_rmse[test_res$set == "drivers"]), 4)` (R²
+   ≈ `r round(max(test_res$test_r2[test_res$set == "drivers"]), 2)`).
+3. **The district-mean baseline is hard to beat out of sample.** It scores `r round(tv("District mean", "none"), 4)`
+   (MAPE `r fmt_pct(tv("District mean", "none", "test_mape"), 1)`). The best models improve on it only marginally. In
+   predictive terms, *where* a house is built tells you most of what our features can tell you.
+4. **Chosen models:**
+   * **`r chosen$model[chosen$set == "drivers"]`, drivers:** test RMSE
+     `r round(tv(as.character(chosen$model[chosen$set == "drivers"]), "drivers"), 4)`, MAPE
+     `r fmt_pct(tv(as.character(chosen$model[chosen$set == "drivers"]), "drivers", "test_mape"), 1)`;
+   * **`r chosen$model[chosen$set == "district"]`, district:** test RMSE
+     `r round(tv(as.character(chosen$model[chosen$set == "district"]), "district"), 4)`, MAPE
+     `r fmt_pct(tv(as.character(chosen$model[chosen$set == "district"]), "district", "test_mape"), 1)`.
+
+   A typical district-quarter is predicted within about 8% of its actual $/m².
+5. **The CV ranking mostly held:** flexible models led on drivers only, and linear models were competitive with
+   district. The order *within* each top group shuffled, which is what you expect when differences are inside one
+   standard error.
+
+In the predicted-vs-actual plot, the fitted (orange) line is **steeper than 45° and sits slightly above it**.
+Steeper means the actual relative costs in 2020–26 were *more spread out* than the models predicted. The models are
+conservative: dear districts turned out even dearer and cheap ones even cheaper. Above means the average relative
+cost rose a little (Step 2: −0.04 → −0.01), which a model trained on 1996–2019 can't know. Both match point 1.
+
+# What drives relative cost? (variable importance)
+
+We use the **drivers** set here. In the district set, the district name absorbs most of the location effect and
+hides which measurable features matter. Three views from three different model types:
+
+* **Lasso, standardised coefficients:** the size of each coefficient after features are put on the same scale
+  (1 SD). The sign gives the direction.
+* **Random forest, permutation importance:** how much the forest's out-of-bag error rises when one feature's values
+  are shuffled (breaking its link to the response).
+* **XGBoost, gain:** the share of total error reduction contributed by splits on each feature.
+
+Dummy columns (regions) are added back together into one `region` score.
+
+```{r importance, cache = TRUE}
+vars <- fsets$drivers; rhs <- rhs_of(vars)
+x_tr <- make_x(train, rhs)
+base_var <- function(col) map_chr(col, \(cn) vars[which(startsWith(cn, vars))[1]])
+
+# lasso at the CV-chosen lambda, coefficients x feature SD = standardised effect
+lasso_fit <- glmnet(x_tr, train[[Y]], alpha = 1, lambda = lambda_grid)
+b <- as.matrix(coef(lasso_fit, s = res_lasso$drivers$best$lambda))[-1, 1]
+imp_lasso <- tibble(column = names(b), value = b * apply(x_tr, 2, sd)) |>
+  mutate(feature = base_var(column)) |>
+  group_by(feature) |> summarise(signed = value[which.max(abs(value))], importance = sum(abs(value)))
+
+# random forest permutation importance at the tuned settings
+bt <- res_rf$drivers$best
+rf_fit <- ranger(fml_of(Y, vars), data = train, num.trees = 500, mtry = bt$mtry,
+                 min.node.size = bt$min.node.size, importance = "permutation",
+                 num.threads = N_CORES, seed = 462)
+imp_rf <- tibble(feature = names(rf_fit$variable.importance), importance = rf_fit$variable.importance)
+
+# xgboost gain at the tuned settings
+bx <- res_xgb$drivers$best
+set.seed(462)
+xgb_fit <- xgb.train(params = list(objective = "reg:squarederror", eta = 0.03, max_depth = bx$max_depth,
+                                   min_child_weight = bx$min_child_weight, subsample = 0.8,
+                                   colsample_bytree = 0.8, nthread = N_CORES),
+                     data = xgb.DMatrix(x_tr, label = train[[Y]]), nrounds = bx$nrounds, verbose = 0)
+imp_xgb <- xgb.importance(model = xgb_fit) |> as_tibble() |>
+  mutate(feature = base_var(Feature)) |> group_by(feature) |> summarise(importance = sum(Gain))
+
+importance <- bind_rows(
+  imp_lasso |> transmute(feature, method = "Lasso |std. coef|", importance, direction = sign(signed)),
+  imp_rf    |> transmute(feature, method = "Random forest permutation", importance),
+  imp_xgb   |> transmute(feature, method = "XGBoost gain", importance)) |>
+  group_by(method) |> mutate(share = importance / sum(importance)) |> ungroup()
+```
+
+```{r importance-plot, fig.height = 4.8}
+imp_order <- importance |> group_by(feature) |> summarise(m = mean(share)) |> arrange(m) |> pull(feature)
+lasso_sign <- importance |> filter(method == "Lasso |std. coef|") |> select(feature, direction)
+
+p_imp <- importance |>
+  left_join(lasso_sign, by = "feature", suffix = c("", "_lasso")) |>
+  mutate(feature = factor(feature, levels = imp_order),
+         dir = case_when(feature %in% c("region") ~ "category",
+                         direction_lasso > 0 ~ "dearer when higher",
+                         direction_lasso < 0 ~ "cheaper when higher",
+                         TRUE ~ "dropped by lasso")) |>
+  ggplot(aes(share, feature, fill = dir)) +
+  geom_col() +
+  facet_wrap(~method) +
+  scale_fill_manual(values = c(`dearer when higher` = "#e76f51", `cheaper when higher` = "#2a6f97",
+                               category = "grey60", `dropped by lasso` = "grey85")) +
+  scale_x_continuous(labels = scales::percent) +
+  labs(title = "What drives a district's relative cost per m²? (drivers set, training years)",
+       subtitle = "Share of each model's total importance; colour = direction in the lasso",
+       x = "Share of importance", y = NULL, fill = NULL) +
+  theme(legend.position = "bottom")
+save_fig(p_imp, "fig22_variable_importance", height = 4.8, width = 9)
+
+importance |> select(feature, method, share) |>
+  pivot_wider(names_from = method, values_from = share) |>
+  arrange(desc(`Random forest permutation`)) |>
+  save_tab("t10_variable_importance") |>
+  kable(digits = 3, caption = "Share of importance by method")
+```
+
+**Observation.** The three methods work in quite different ways, yet they agree on the top four:
+
+1. **Residential alteration spending** (`log_resid_alt_real`, dearer when higher) is the top numeric driver in all
+   three. Districts where people spend a lot renovating are wealthier, with dearer land, higher specifications and
+   busier trades.
+2. **Region** (a category; the lasso share adds up 15 dummy coefficients, which inflates it): broad location still
+   matters after the other features.
+3. **New dwellings per 1,000 residents** (dearer when higher): fast-growing places, where builders are stretched.
+4. **Number of new houses** (`log_houses_n`, **cheaper** when higher, holding the others fixed). For a given level of
+   wealth and growth, districts building *many* houses are cheaper per m². This is consistent with volume builders
+   and large greenfield subdivisions such as Selwyn.
+
+Next come **relative house size** (bigger houses are cheaper per m², because fixed costs such as kitchens and
+bathrooms are spread over more floor area), then non-residential activity and growth. The dwelling-mix shares
+(apartments, townhouses, retirement) matter little.
+
+Remember these are *associations* in observational data. For example, more alteration spending in a district does
+not *cause* dearer new houses; both reflect a wealthier, busier building market. Step 4 will look at *how* each
+top driver changes predictions (partial dependence) and at which districts the model gets wrong.
+
+# Secondary response: log real $/m² and the extrapolation problem
+
+The pitch's original target was real $/m² itself. Here we add the national time trend `t_index` and use
+`avg_house_m2` (absolute size), and fit a subset of the models on the same folds.
+
+```{r real-response, cache = TRUE}
+Y2 <- "log_real_cost_m2"
+num_real <- c("avg_house_m2", setdiff(num_main, "rel_house_m2"), "t_index")
+fsets_real <- list(drivers = c(num_real, "region", "is_city"), district = c(num_real, "ta"))
+
+real_spec <- list(
+  "District mean"     = list(fp = fp_district_mean, sets = list(none = character(0))),
+  "Linear regression" = list(fp = fp_ols),
+  "Lasso"             = list(fp = fp_glmnet, grid = tibble(alpha = 1), inner = "lambda"),
+  "Regression tree"   = list(fp = fp_tree, grid = expand_grid(cp = c(0.001, 0.002, 0.005, 0.01), minbucket = c(10, 30))),
+  "Random forest"     = list(fp = fp_rf, grid = expand_grid(mtry = c(4, 8), min.node.size = c(5, 20))),
+  "XGBoost"           = list(fp = fp_xgb, grid = expand_grid(max_depth = c(4, 6), min_child_weight = c(1, 10)),
+                             inner = "nrounds")
+)
+real_res <- imap(real_spec, function(s, m) {
+  sets <- s$sets %||% fsets_real
+  r    <- tune_model(s$fp, grid = s$grid, inner = s$inner, sets = sets, y = Y2)
+  p    <- refit_predict(s$fp, r, sets, Y2, train, test, inner = s$inner)
+  list(res = r, pred = p)
+})
+```
+
+```{r real-results}
+real_test <- imap_dfr(real_res, function(x, m) imap_dfr(x$pred, \(p, set)
+  tibble(model = m, set = set, row = seq_along(p), pred = p))) |>
+  left_join(test |> mutate(row = row_number()) |> select(row, yq, year, obs = log_real_cost_m2, real_cost_m2),
+            by = "row")
+
+real_table <- real_test |>
+  group_by(model, set) |>
+  summarise(reg_metrics(obs, pred), mape = mape(real_cost_m2, exp(pred)),
+            mean_bias = mean(pred - obs), .groups = "drop") |>
+  left_join(imap_dfr(real_res, \(x, m) summarise_tuning(x$res, m)) |> select(model, set, cv_rmse),
+            by = c("model", "set")) |>
+  rename(test_rmse = rmse, test_mae = mae, test_r2 = r2, test_mape = mape) |>
+  arrange(set, test_rmse)
+save_tab(real_table, "t11_real_response_results") |>
+  kable(digits = 4, caption = "Log real $/m² (with time trend): CV and test scores. mean_bias < 0 = under-predicts.")
+```
+
+```{r real-plot, fig.height = 4.2}
+real_nat <- real_test |>
+  filter(set %in% c("district", "none")) |>
+  group_by(model, yq, year) |>
+  summarise(pred = exp(mean(pred)), .groups = "drop") |>
+  mutate(t = as.numeric(substr(yq, 1, 4)) + (as.numeric(substr(yq, 6, 6)) - 1) / 4)
+actual_nat <- dat |> filter(year >= 2010) |> group_by(yq) |>
+  summarise(actual = exp(mean(log_real_cost_m2)), .groups = "drop") |>
+  mutate(t = as.numeric(substr(yq, 1, 4)) + (as.numeric(substr(yq, 6, 6)) - 1) / 4)
+
+p_real <- ggplot() +
+  geom_line(data = actual_nat, aes(t, actual), colour = "black", linewidth = 0.9) +
+  geom_line(data = real_nat, aes(t, pred, colour = model), linewidth = 0.7) +
+  geom_vline(xintercept = 2020, linetype = 2, colour = "grey50") +
+  annotate("text", x = 2020.1, y = max(actual_nat$actual), label = "test period →", hjust = 0, size = 3) +
+  scale_y_continuous(labels = scales::dollar_format(accuracy = 1)) +
+  labs(title = "Real $/m² after 2019: trees flatten out, straight-line trends overshoot",
+       subtitle = "Black = actual (geometric mean across districts); colours = test predictions, district set",
+       x = NULL, y = "Real $/m² (June 2026 $)", colour = NULL) +
+  theme(legend.position = "right")
+save_fig(p_real, "fig23_real_cost_extrapolation", height = 4.2, width = 8)
+```
+
+**Observation.** Each model family fails in its own characteristic way once it has to predict a *level* it never
+saw:
+
+* **District mean:** ignores time entirely and under-predicts by about
+  `r fmt_pct(-real_table$mean_bias[real_table$model == "District mean"], 0)`.
+* **Regression tree and random forest:** predictions flatten at roughly the last level in the training data and
+  stay there (mean bias `r round(real_table$mean_bias[real_table$model == "Regression tree" & real_table$set == "district"], 3)`
+  and `r round(real_table$mean_bias[real_table$model == "Random forest" & real_table$set == "district"], 3)`). A
+  tree can only output averages of training rows, so `t_index` beyond 2019 is treated like 2019.
+* **Linear and lasso:** they carry the 1996–2019 trend forward as a straight line and **overshoot** (mean bias
+  `r sprintf("%+.3f", real_table$mean_bias[real_table$model == "Linear regression" & real_table$set == "district"])`),
+  because real costs after 2019 rose more slowly than the 1996–2019 trend.
+* **XGBoost** happens to land closest. It leans on activity features (alterations, growth) that *did* move in the
+  test years, rather than on the clock. That is a lucky proxy, not a reliable mechanism.
+
+This is why the **relative** response is the main one for RQ1. It removes the national level, so no model has to
+guess the future price level, and it asks a question that the pre-2020 data can answer.
+
+# Summary and next step
+
+```{r save-results}
+saveRDS(list(cv = cv_all, test = test_res, chosen = chosen, importance = importance,
+             real = real_table, test_predictions = test_long,
+             best_settings = map(spec, \(s) map(s$res, "best"))),
+        file.path(paths$models_rq1, "rq1_step3_results.rds"))
+list.files(paths$models_rq1)
+```
+
+| # | Finding | Consequence |
+|---|---|---|
+| 1 | With drivers only, the flexible models (forest, XGBoost, SVM) beat the linear family: CV R² ≈ 0.32 vs 0.25. | The drivers act non-linearly and in combination. |
+| 2 | No drivers-only model clearly beats "each district's own average" (CV or test). | Our measured features capture roughly what location captures, not more. Part of the location effect remains unexplained (land, terrain, local costs). |
+| 3 | With the district added, penalised linear models are best (CV R² ≈ 0.42), and they beat the district mean. | The drivers explain movements around each district's usual level, and mostly additively. |
+| 4 | Main drivers: alteration spending (+), region, dwellings per 1,000 residents (+), number of new houses (−), house size (−). | This is the answer to "what drives" for the report. Step 4 will show the shapes. |
+| 5 | Every model is worse in 2020–26, the baseline included. | The test years were unusually dispersed (COVID, boom, bust). The ranking mostly held. |
+| 6 | On real $/m², trees flatten and linear trends overshoot. | Confirms the relative response as the main RQ1 target. |
+
+**Step 4 (next):**
+
+* interpret the chosen models (partial-dependence plots for the top drivers);
+* look at test errors by district and year (where is the model wrong?);
+* optionally refine the tuning grid around the winner;
+* write the RQ1 answer for the report.
+
+# Appendix: helper functions
+
+This notebook uses helper functions from `R/utils_data.R` and `R/utils_models.R`, printed here so the document is
+complete on its own.
+
+```{r appendix-utils-data, code = readLines(file.path(proj_root, "R", "utils_data.R")), eval = FALSE}
+```
+
+```{r appendix-utils-models, code = readLines(file.path(proj_root, "R", "utils_models.R")), eval = FALSE}
+```
+
+```{r session, include = FALSE}
+sessionInfo()
+```

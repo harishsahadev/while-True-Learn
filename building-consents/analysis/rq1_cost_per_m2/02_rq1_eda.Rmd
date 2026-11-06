@@ -1,0 +1,413 @@
+---
+title: "RQ1 Step 2: Exploratory data analysis"
+subtitle: "What drives the real cost per m² of new houses across districts?"
+author: "while True: learn(), Group 8, STAT462"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: show
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE,
+                      fig.align = "center", out.width = "85%")
+find_proj_root <- function(path = getwd()) {
+  path <- normalizePath(path)
+  repeat {
+    if (length(list.files(path, pattern = "\\.Rproj$"))) return(path)
+    parent <- dirname(path)
+    if (parent == path) stop("No .Rproj file found above ", getwd())
+    path <- parent
+  }
+}
+proj_root <- find_proj_root()
+knitr::opts_knit$set(root.dir = proj_root)
+```
+
+```{r load}
+source(file.path(proj_root, "R", "utils_data.R"))
+library(knitr)
+
+rq1   <- readRDS(file.path(paths$processed, "rq1_model_data.rds"))        # modelled rows (>= 5 houses)
+full  <- read_csv(file.path(paths$processed, "rq1_district_quarter_full.csv"),
+                  show_col_types = FALSE)                                   # all 9,715 rows
+train <- rq1 |> filter(split == "train")
+
+# the numeric candidate predictors (lags are looked at separately in section 8)
+feat_num <- c("avg_house_m2", "rel_house_m2", "log_houses_n", "multiunit_share", "apt_share",
+              "retire_share", "dwell_per_1000", "houses_yoy", "log_resid_alt_real",
+              "log_nonres_real", "t_index")
+
+dim(rq1); dim(train)
+```
+
+# Purpose and ground rules
+
+Step 1 produced a clean table. Before fitting models, EDA answers four questions:
+
+1. **How does the response behave** over time and across places?
+2. **Which candidate drivers are related to it**, and is the relationship real or a side-effect of something else?
+3. **Which predictors overlap** with each other (a problem for interpreting linear regression)?
+4. **What should Step 3 do** about the response, missing values and the feature set?
+
+**Ground rule: explore the training set only (1990–2019).** Anything we *decide* after looking at the test years
+(2020–2026) would leak test information into the model, and the test score would no longer be an honest check.
+The one exception is section 7, which looks only at whether the two periods *differ*, so we can plan for that.
+It doesn't choose features or settings from the test data.
+
+# Overview of the candidate predictors
+
+```{r overview}
+feature_summary <- train |>
+  select(all_of(feat_num), real_cost_m2, log_real_cost_m2, rel_log_cost_m2) |>
+  pivot_longer(everything(), names_to = "variable") |>
+  group_by(variable) |>
+  summarise(missing = sum(is.na(value)),
+            min = min(value, na.rm = TRUE),
+            median = median(value, na.rm = TRUE),
+            mean = mean(value, na.rm = TRUE),
+            max = max(value, na.rm = TRUE), .groups = "drop")
+save_tab(feature_summary, "t04_feature_summary") |> kable(digits = 3, caption = "Training rows")
+```
+
+## Missing values are structural, not random
+
+```{r missing}
+train |>
+  summarise(rows = n(),
+            dwell_per_1000_missing = sum(is.na(dwell_per_1000)),
+            dwell_per_1000_missing_from_1996 = sum(is.na(dwell_per_1000) & year >= 1996),
+            houses_yoy_missing = sum(is.na(houses_yoy)),
+            houses_yoy_missing_from_1996 = sum(is.na(houses_yoy) & year >= 1996),
+            rows_from_1996 = sum(year >= 1996)) |>
+  pivot_longer(everything()) |> kable()
+```
+
+**Observation.** Only two predictors have gaps, and both have a known cause:
+
+* `dwell_per_1000` is missing for **every** row before 1996 (Stats NZ's per-resident series starts then), and for none after.
+* `houses_yoy` needs the same quarter a year earlier, so it is missing in 1990–91.
+
+**Decision for Step 3:** train on **1996Q1–2019Q4**. Then every row has every predictor, with no imputation.
+It costs `r sum(train$year < 1996)` training rows but still leaves `r fmt_int(sum(train$year >= 1996))`.
+(Dropping `dwell_per_1000` instead would keep 1990–95, but section 5 shows it is one of the more useful predictors.)
+
+# Time: the national cycle
+
+```{r time-trend, fig.height = 3.8}
+nat_q <- full |>
+  group_by(year, quarter, yq, split) |>
+  summarise(real = sum(houses_val * real_factor) / sum(houses_m2), .groups = "drop") |>
+  mutate(date = year + (quarter - 1) / 4)
+
+p_time <- ggplot(nat_q, aes(date, real)) +
+  annotate("rect", xmin = 2020, xmax = Inf, ymin = -Inf, ymax = Inf, alpha = 0.12, fill = "#e07a1f") +
+  annotate("text", x = 2023.2, y = min(nat_q$real) + 50, label = "test period", colour = "#e07a1f") +
+  geom_line(colour = "#2a6f97", linewidth = 0.8) +
+  scale_y_continuous(labels = scales::label_dollar(accuracy = 1)) +
+  labs(title = "Real cost per m² rose through the 2000s and jumped after 2020",
+       subtitle = "New houses, New Zealand, quarterly, June-2026 dollars",
+       x = NULL, y = "Real $ per m²")
+save_fig(p_time, "fig06_nz_quarterly_trend")
+```
+
+```{r seasonality}
+train |> group_by(quarter) |>
+  summarise(median_real = median(real_cost_m2), median_relative = median(rel_log_cost_m2)) |>
+  kable(digits = 3, caption = "By calendar quarter (training rows)")
+```
+
+**Observation.** The national real cost moves in long waves (a dip in the early 1990s, a rise from about 1996
+to 2009, another from 2012 to 2019, and a sharp step after 2020). There is **no seasonality**: medians by calendar
+quarter differ by less than 1%. So `quarter` is unlikely to help any model.
+
+# Place vs time: how much does each explain?
+
+A simple way to measure how much a grouping "explains" is the R² of a regression of the response on that grouping
+alone: the share of the variance accounted for by group averages.
+
+```{r variance-explained}
+r2 <- function(response, grouping) {
+  f <- as.formula(paste(response, "~", grouping))
+  summary(lm(f, data = train))$r.squared
+}
+groupings <- c("ta", "region", "island", "is_city", "factor(yq)", "factor(quarter)", "ta + factor(yq)")
+labels    <- c("District", "Region", "Island", "City vs district", "Quarter (time)", "Season", "District + time")
+
+var_expl <- tibble(grouping = labels,
+                   `log real $/m²` = map_dbl(groupings, ~ r2("log_real_cost_m2", .x)),
+                   `relative cost` = map_dbl(groupings, ~ r2("rel_log_cost_m2", .x)))
+save_tab(var_expl, "t05_variance_explained") |> kable(digits = 3, caption = "R² of each grouping alone (training rows)")
+
+p_var <- var_expl |>
+  filter(grouping != "District + time") |>
+  pivot_longer(-grouping, names_to = "response", values_to = "r2") |>
+  mutate(grouping = fct_reorder(grouping, r2, .fun = max)) |>
+  ggplot(aes(r2, grouping, fill = response)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c("#9aa5b1", "#2a6f97")) +
+  scale_x_continuous(labels = scales::percent) +
+  labs(title = "Time dominates real cost; place dominates relative cost",
+       subtitle = "Share of variance explained by each grouping on its own (training rows)",
+       x = "R²", y = NULL, fill = NULL) +
+  theme(legend.position = "top")
+save_fig(p_var, "fig07_variance_explained", height = 3.6)
+```
+
+**Observation.**
+
+* For **log real $/m²**, *time* (which quarter) explains about `r fmt_pct(var_expl[[2]][5], 0)` of the variance and
+  *district* about `r fmt_pct(var_expl[[2]][1], 0)`; together about `r fmt_pct(var_expl[[2]][7], 0)`.
+  Most of the variation is the whole country moving together.
+* For **relative cost**, time explains almost nothing (by construction) and district explains
+  `r fmt_pct(var_expl[[3]][1], 0)`. This is the cross-district signal RQ1 is about.
+* Region explains far less than district, and island almost nothing, so cost differences are **local**,
+  not broad North-vs-South patterns. Season explains nothing.
+
+# Which districts are dear or cheap?
+
+```{r district-ranking, fig.height = 9.5, out.width = "80%"}
+district_rank <- train |>
+  group_by(ta, island) |>
+  summarise(median_rel = median(rel_log_cost_m2), quarters = n(), .groups = "drop") |>
+  mutate(ta = fct_reorder(str_remove(ta, " District| City"), median_rel))
+
+p_rank <- ggplot(district_rank, aes(median_rel, ta, colour = island)) +
+  geom_vline(xintercept = 0, colour = "grey60") +
+  geom_point(size = 2) +
+  scale_colour_manual(values = c(North = "#2a6f97", South = "#e07a1f", Chatham = "grey50")) +
+  scale_x_continuous(labels = function(x) paste0(ifelse(x > 0, "+", ""), round(100 * x), "%")) +
+  labs(title = "Cost relative to the rest of NZ, by district (1990–2019)",
+       subtitle = "Median of log(district $/m²) − log(rest-of-NZ $/m²), roughly % dearer or cheaper",
+       x = NULL, y = NULL, colour = NULL) +
+  theme(legend.position = "top", axis.text.y = element_text(size = 7))
+save_fig(p_rank, "fig08_district_ranking", height = 9.5)
+```
+
+```{r region-box, fig.height = 4.5}
+p_region <- train |>
+  mutate(region = fct_reorder(str_remove(region, " Region"), rel_log_cost_m2, .fun = median)) |>
+  ggplot(aes(rel_log_cost_m2, region)) +
+  geom_vline(xintercept = 0, colour = "grey60") +
+  geom_boxplot(outlier.size = 0.4, fill = "#cfe0ec") +
+  labs(title = "Within every region, districts and quarters vary widely",
+       x = "Relative cost (log points)", y = NULL)
+save_fig(p_region, "fig09_region_boxplot", height = 4.5)
+```
+
+**Observation.**
+
+* **Dearest** (1990–2019): Queenstown-Lakes (about +15% vs the rest of NZ), Wellington City (+11%), Thames-Coromandel,
+  Lower Hutt, Porirua and Auckland. These are high-amenity, holiday-home or land-constrained urban markets.
+* **Cheapest:** Ōpōtiki (about −19%, a small district), South Waikato, Selwyn, Horowhenua, Tararua and Ashburton. These
+  are rural districts, plus Selwyn, a large fast-growing subdivision market where volume builders put up many
+  similar houses.
+* **Why most districts sit below 0:** "the rest of NZ" is weighted by floor area, so it's dominated by large and
+  relatively dear Auckland, Wellington and Christchurch. A typical *small* district is therefore a few percent
+  below it. The ordering, not the zero line, is what matters.
+* The region boxes overlap heavily, so region alone is a weak guide, matching its low R² above.
+
+# Candidate drivers vs the response
+
+## A lesson in confounding: house size
+
+```{r house-size, fig.height = 4}
+p_size <- bind_rows(
+  train |> transmute(panel = "A. Raw: house size vs log real $/m²",
+                     x = avg_house_m2, y = log_real_cost_m2, year),
+  train |> transmute(panel = "B. Same quarter: relative size vs relative cost",
+                     x = rel_house_m2, y = rel_log_cost_m2, year)
+) |>
+  ggplot(aes(x, y)) +
+  geom_point(aes(colour = year), size = 0.6, alpha = 0.5) +
+  geom_smooth(method = "lm", colour = "black", se = FALSE, linewidth = 0.8) +
+  scale_colour_viridis_c() +
+  facet_wrap(~ panel, scales = "free") +
+  labs(title = "Bigger houses look dearer per m² only because both rose over time",
+       x = NULL, y = NULL, colour = "Year")
+save_fig(p_size, "fig10_house_size_confounding", height = 4)
+```
+
+**Observation.** Panel A suggests bigger houses cost *more* per m². But colour shows why: houses grew from about
+150 m² to over 200 m² between 1990 and the late 2000s *while* real costs also rose, so time drives both.
+Compare houses **in the same quarter** (panel B) and the relationship almost disappears (r =
+`r round(cor(train$rel_house_m2, train$rel_log_cost_m2), 2)`). Larger-than-average houses for their time are
+*not* clearly cheaper or dearer per m². We expected a negative slope (fixed costs spread over more m²); the data
+don't show it, perhaps because bigger houses are also built to a higher spec, which cancels the effect out. A predictor that looks
+important can be standing in for something else. This is **confounding**, and it's why the relative framing helps.
+
+## All numeric drivers
+
+```{r features-vs-response, fig.height = 7}
+p_feat <- train |>
+  filter(year >= 1996) |>
+  select(rel_log_cost_m2, all_of(setdiff(feat_num, c("t_index", "avg_house_m2")))) |>
+  pivot_longer(-rel_log_cost_m2, names_to = "feature") |>
+  ggplot(aes(value, rel_log_cost_m2)) +
+  geom_point(size = 0.3, alpha = 0.2, colour = "#2a6f97") +
+  geom_smooth(method = "loess", span = 0.5, colour = "#c0392b", se = FALSE, linewidth = 0.8) +
+  facet_wrap(~ feature, scales = "free_x", ncol = 3) +
+  coord_cartesian(ylim = c(-0.6, 0.6)) +
+  labs(title = "Relative cost against each candidate driver (training rows, 1996–2019)",
+       subtitle = "Red line = smoothed average (loess)",
+       x = NULL, y = "Relative cost (log points)")
+save_fig(p_feat, "fig11_features_vs_relative_cost", height = 7)
+```
+
+```{r correlations}
+cor_tab <- tibble(feature = feat_num) |>
+  mutate(
+    `with log real $/m²` = map_dbl(feature, ~ cor(train[[.x]], train$log_real_cost_m2, use = "complete.obs")),
+    `with relative cost` = map_dbl(feature, ~ cor(train[[.x]], train$rel_log_cost_m2, use = "complete.obs"))
+  ) |>
+  arrange(desc(abs(`with relative cost`)))
+save_tab(cor_tab, "t06_feature_correlations") |>
+  kable(digits = 3, caption = "Pearson correlation with each response (training rows)")
+```
+
+**Observation.**
+
+* The strongest (still modest) links with relative cost are **building activity**: real value of residential
+  alterations, number of new houses, building intensity per resident and non-residential activity. Busier, growing
+  markets are dearer per m², which fits a story of competition for builders and higher-spec urban building.
+* **Multi-unit share** is positively related: places building apartments and townhouses are denser and costlier.
+* **House size**, once compared within the quarter, has almost no linear relationship. (Section 5.1; the forest in
+  Step 3 can still check for a non-linear one.)
+* **`houses_yoy`** (a sudden change in volume) is close to zero.
+* `t_index` correlates strongly with *real* cost but not with *relative* cost, as expected.
+* No single numeric driver is strong (|r| < 0.4). The models will have to combine several, and location will carry
+  a lot of the signal.
+
+# Overlap between predictors (multicollinearity)
+
+```{r feature-correlation-heatmap, fig.height = 5.5}
+cm <- cor(train |> filter(year >= 1996) |> select(all_of(feat_num)), use = "pairwise.complete.obs")
+p_heat <- as_tibble(cm, rownames = "a") |>
+  pivot_longer(-a, names_to = "b", values_to = "r") |>
+  mutate(a = factor(a, levels = feat_num), b = factor(b, levels = rev(feat_num))) |>
+  ggplot(aes(a, b, fill = r)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = sprintf("%.2f", r)), size = 2.6) +
+  scale_fill_gradient2(low = "#c0392b", mid = "white", high = "#2a6f97", limits = c(-1, 1)) +
+  labs(title = "Activity measures overlap strongly", x = NULL, y = NULL, fill = "r") +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1))
+save_fig(p_heat, "fig12_feature_correlation_heatmap", height = 5.5)
+```
+
+The **variance inflation factor (VIF)** measures how much a coefficient's variance is inflated because that predictor
+can be predicted from the others: VIF = 1 / (1 − R²) from regressing it on all other predictors. Above about 5 is a
+warning, above 10 a problem.
+
+```{r vif}
+vif_data <- train |> filter(year >= 1996) |> select(all_of(feat_num)) |> drop_na()
+vif_tab <- tibble(feature = feat_num) |>
+  mutate(VIF = map_dbl(feature, function(v) {
+    r2_v <- summary(lm(reformulate(setdiff(feat_num, v), response = v), data = vif_data))$r.squared
+    1 / (1 - r2_v)
+  })) |>
+  arrange(desc(VIF))
+save_tab(vif_tab, "t07_vif") |> kable(digits = 2)
+```
+
+**Observation.** Number of new houses, residential alterations and non-residential activity are all measures of
+*how big and busy* a district's building market is, so they overlap (r ≈ 0.7–0.85). Raw and relative house size
+also overlap by construction. That's fine for **prediction**, and **lasso** is designed to cope with it (it tends to
+keep one of a correlated group). But in plain **linear regression** the individual coefficients of overlapping
+predictors will be unstable and shouldn't be over-interpreted. For Step 3 we will use `rel_house_m2` (not both size
+measures) in the relative model.
+
+# Train vs test: does the past look like the future?
+
+```{r shift, fig.height = 3.6}
+p_shift <- rq1 |>
+  select(split, `log real $/m²` = log_real_cost_m2, `relative cost` = rel_log_cost_m2) |>
+  pivot_longer(-split) |>
+  ggplot(aes(value, fill = split)) +
+  geom_density(alpha = 0.5, colour = NA) +
+  facet_wrap(~ name, scales = "free") +
+  scale_fill_manual(values = c(train = "#2a6f97", test = "#e07a1f")) +
+  labs(title = "Real cost shifted upward after 2020; relative cost barely moved",
+       x = NULL, y = "Density", fill = NULL) +
+  theme(legend.position = "top")
+save_fig(p_shift, "fig13_train_test_shift", height = 3.6)
+
+rq1 |> group_by(split) |>
+  summarise(median_real = median(real_cost_m2),
+            mean_log_real = mean(log_real_cost_m2),
+            mean_relative = mean(rel_log_cost_m2),
+            sd_relative = sd(rel_log_cost_m2)) |>
+  kable(digits = 3)
+```
+
+```{r persistence, fig.height = 4.2}
+persist <- rq1 |>
+  group_by(ta, split) |>
+  summarise(mean_rel = mean(rel_log_cost_m2), .groups = "drop") |>
+  pivot_wider(names_from = split, values_from = mean_rel)
+
+p_persist <- ggplot(persist, aes(train, test)) +
+  geom_abline(slope = 1, intercept = 0, colour = "grey60", linetype = 2) +
+  geom_point(colour = "#2a6f97") +
+  geom_text(data = persist |> filter(abs(test) > 0.15 | abs(train) > 0.12),
+            aes(label = str_remove(ta, " District| City")), size = 2.6, vjust = -0.7) +
+  labs(title = "Districts that were dear before 2020 are mostly still dear",
+       subtitle = paste0("Mean relative cost per district; correlation = ",
+                         round(cor(persist$train, persist$test, use = "complete.obs"), 2)),
+       x = "Train period (1990–2019)", y = "Test period (2020–2026)") +
+  scale_x_continuous(expand = expansion(mult = c(0.05, 0.2)))
+save_fig(p_persist, "fig14_district_persistence", height = 4.2)
+```
+
+**Observation.** The median real cost in the test period is about
+`r fmt_pct(median(rq1$real_cost_m2[rq1$split == "test"]) / median(train$real_cost_m2) - 1, 0)` higher than in training.
+This matters for model choice: **trees and random forests cannot extrapolate**. A tree predicts averages of training
+rows, so it can never predict a level above anything it saw before 2020. A linear model with a time trend *can*
+extrapolate, but only as a straight line. For the **relative** response the shift is small, and districts keep
+their rank (correlation `r round(cor(persist$train, persist$test, use = "complete.obs"), 2)`), so the patterns learned
+before 2020 should transfer.
+
+# Lagged response
+
+```{r lags}
+train |>
+  summarise(`lag 1 quarter` = cor(real_cost_m2_lag1, real_cost_m2, use = "complete.obs"),
+            `lag 4 quarters` = cor(real_cost_m2_lag4, real_cost_m2, use = "complete.obs")) |>
+  kable(digits = 3, caption = "Correlation of real $/m² with its own past values")
+```
+
+**Observation.** Last quarter's cost is the single best predictor of this quarter's
+(r = `r round(cor(train$real_cost_m2_lag1, train$real_cost_m2, use = "complete.obs"), 2)`). But a model built
+on it answers *"what will cost be, given what it just was?"* (forecasting), not *"what drives cost?"* (explanation).
+It would also swamp every other driver in importance. **Decision:** the main models exclude lags; we may add a
+lagged model in Step 3 as a forecasting benchmark.
+
+# Summary: findings and decisions for Step 3
+
+| # | Finding | Decision for Step 3 |
+|---|---|---|
+| 1 | Time explains ~40% of variance in log real $/m²; district ~20%. Test years are ~17% dearer. | Fit **two responses**: *relative cost* (main, answers "across districts") and *log real $/m²* (secondary, with a time trend). |
+| 2 | Relative cost: district explains ~32%; rankings persist into 2020–26 (r ≈ 0.73). | Location will be the strongest driver. Include district (as categories) in some models and not in others, to see how much the measurable drivers explain on their own. |
+| 3 | Region weak, island ~0, season ~0. | Keep region; drop island and season. |
+| 4 | Activity measures (alterations, new houses, non-residential, per-1000) and multi-unit share relate positively to relative cost. | Core numeric predictors. |
+| 5 | House size: confounded by time; almost no relationship within the quarter. | Use `rel_house_m2` with the relative response; `avg_house_m2` with the real response. |
+| 6 | Activity measures overlap (VIF). | Interpret linear coefficients with care; rely on lasso and forest importance for "what drives". |
+| 7 | `dwell_per_1000` missing before 1996. | Train on **1996Q1–2019Q4** (no imputation). |
+| 8 | Lags are strong but answer a forecasting question. | Exclude from the main models. |
+| 9 | Trees can't extrapolate the post-2020 level. | Expect trees/forests to do poorly on *real* cost in 2020–26 but fine on *relative* cost. Worth saying in the report. |
+
+**Metrics for Step 3:** RMSE and MAE on the log scale (≈ % error), plus MAPE on $/m² for the real response, to keep
+the pitch's metric. Baseline to beat: predicting each district's training-period average.
+
+# Appendix: helper functions
+
+This notebook uses helper functions from `R/utils_data.R`, printed here so the document is complete on its own.
+
+```{r appendix-utils-data, code = readLines(file.path(proj_root, "R", "utils_data.R")), eval = FALSE}
+```
+
+```{r session, include = FALSE}
+sessionInfo()
+```

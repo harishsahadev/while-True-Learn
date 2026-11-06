@@ -1,0 +1,3 @@
+split,period,all_rows,modelled_rows,districts_modelled
+train,1990Q2 to 2019Q4,7973,7051,67
+test,2020Q1 to 2026Q2,1742,1611,67
