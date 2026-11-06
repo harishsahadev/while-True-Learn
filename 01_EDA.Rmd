@@ -35,7 +35,7 @@ set.seed(462)   # project seed; this document only uses it to sample rows for di
 # the only line to change on another machine: the folder holding the CSVs
 # extracted from the two Stats NZ zips. Set STAT462_DATA in your .Renviron,
 # or edit the fallback. The folder must sit outside OneDrive
-data_root <- Sys.getenv("STAT462_DATA", unset = "C:/Users/Boulton/Documents/Masters Data Science/STAT462/Group Project/raw")
+data_root <- Sys.getenv("STAT462_DATA", unset = "/home/harish/Harish/University of Canterbury/Term 1/STAT462-26C4 - Data Mining/Group 8 Project/Dataset/raw")
 ```
 
 This document is the exploratory data analysis for the group project's dataset, Stats NZ's *Building consents issued: August 2026* release (published 1 October 2026, CC BY 4.0). It reads the 13 CSV tables in the release, describes what each one holds — grain, columns, dimension values, period coverage, status flags and the traps we found — and takes a first look at the three quantities our research questions are built on: the consented value per square metre of new houses (RQ1), the building profile of each district (RQ2), and whether a district's dwelling consents rise or fall from one year to the next (RQ3). It fits no models. It ends with the decisions the cleaning pipeline has to make, which the next document carries out.

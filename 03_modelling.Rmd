@@ -1,0 +1,396 @@
+---
+title: "What drives the real cost per m² of new houses across districts?"
+subtitle: "Linear and lasso regression vs regression tree and random forest"
+author: "Group 8 · STAT462 Assessment 1"
+output:
+  html_document:
+    toc: yes
+    number_sections: yes
+    toc_float: yes
+---
+
+```{r setup, include = FALSE}
+Sys.setenv(LANG = "en")
+knitr::opts_chunk$set(message = FALSE,
+                      warning = FALSE,
+                      fig.align = 'center',
+                      out.width = '75%')
+library(tidyverse)
+library(knitr)
+library(glmnet)
+library(rpart)
+library(rpart.plot)
+library(ranger)
+set.seed(462)
+
+# same setting as the other documents
+data_root   <- Sys.getenv("STAT462_DATA", unset = "../../Dataset/raw")
+derived_dir <- file.path(dirname(normalizePath(data_root)), "derived")
+```
+
+This document answers RQ1 from the frame built in `02_cleaning.Rmd`: what is associated with the real cost per square metre of new houses across districts? Four models are fitted on the same features: linear regression, lasso, a regression tree and a random forest. They are compared on quarters they have not seen (2020 onwards) and then used to say which features matter.
+
+The answer is about association, not cause. Nothing here says that changing one feature would change the cost.
+
+# The data
+
+```{r load}
+dat <- readRDS(file.path(derived_dir, "rq1_frame.rds"))
+
+# keep districts that appear in both train and test, so every district level
+# can be predicted in every model
+common <- intersect(dat$area[dat$split == "train"], dat$area[dat$split == "test"])
+cat("Districts dropped for appearing in only one of train/test:",
+    n_distinct(dat$area) - length(common), "\n")
+
+dat <- dat %>% filter(area %in% common) %>% mutate(area = factor(area))
+train <- dat %>% filter(split == "train")
+test  <- dat %>% filter(split == "test")
+
+# make the factor levels identical in train and test
+lev <- levels(droplevels(train$area))
+train$area <- factor(train$area, levels = lev)
+test$area  <- factor(test$area,  levels = lev)
+
+cat("Train:", nrow(train), "rows   Test:", nrow(test), "rows\n")
+```
+
+The response is `log_real_m2`, the log of real dollars per square metre.
+
+```{r ranges}
+dat %>%
+  group_by(split) %>%
+  summarise(min = min(log_real_m2), median = median(log_real_m2), max = max(log_real_m2)) %>%
+  kable(digits = 2, caption = "Response range, train vs test (log real $/m²)")
+```
+
+If the test range sits above the training range, the tree and the forest cannot predict it, because they can only return values they saw in training. That matters for the comparison below.
+
+## Validation inside the training set
+
+Tuning also has to respect time. The training years are cut into five consecutive blocks, and each block is held out once.
+
+```{r folds}
+train_years <- sort(unique(train$year))
+year_block  <- tibble(year = train_years,
+                      fold = cut(seq_along(train_years), breaks = 5, labels = FALSE))
+foldid <- train %>% left_join(year_block, by = "year") %>% pull(fold)
+table(foldid)
+```
+
+# Three feature sets
+
+Features that describe the buildings and the local market come first. Set B adds time. Set C adds the district itself, which soaks up everything permanent about a place and is the strongest benchmark but the weakest explanation.
+
+```{r sets}
+feat_core <- c("multi_unit_share", "m2_per_house", "log_houses", "nonres_area_share",
+               "per1000_lag1", "dw_growth", "log_dw_trail4", "sa2_top3_share")
+
+sets <- list(
+  "A: building and market features" = feat_core,
+  "B: A + time trend and quarter"   = c(feat_core, "time_trend", "quarter_f"),
+  "C: B + district"                 = c(feat_core, "time_trend", "quarter_f", "area")
+)
+```
+
+# Fitting
+
+One function fits all four models for a feature set. The numeric features are standardised for the linear model and the lasso so their coefficients can be compared; the tree and the forest use the raw values.
+
+```{r fit-function}
+rmse <- function(y, p) sqrt(mean((y - p)^2))
+mae  <- function(y, p) mean(abs(y - p))
+# out-of-sample R-squared against the training mean
+oos_r2 <- function(y, p) 1 - sum((y - p)^2) / sum((y - mean(train$log_real_m2))^2)
+
+fit_set <- function(feats) {
+  f <- reformulate(feats, "log_real_m2")
+
+  # standardised copies for lm and lasso
+  nums <- feats[map_lgl(feats, ~ is.numeric(train[[.x]]))]
+  mu   <- set_names(map_dbl(nums, ~ mean(train[[.x]])), nums)
+  sdv  <- set_names(map_dbl(nums, ~ sd(train[[.x]])),   nums)
+  tr <- train; te <- test
+  for (n in nums) {
+    tr[[n]] <- (tr[[n]] - mu[[n]]) / sdv[[n]]
+    te[[n]] <- (te[[n]] - mu[[n]]) / sdv[[n]]
+  }
+  x_tr <- model.matrix(f, tr)[, -1, drop = FALSE]
+  x_te <- model.matrix(f, te)[, -1, drop = FALSE]
+
+  # linear regression
+  m_lm  <- lm(f, data = tr)
+  p_lm  <- predict(m_lm, te)
+
+  # lasso, lambda chosen by the time-blocked folds (1-SE rule)
+  m_las <- cv.glmnet(x_tr, tr$log_real_m2, alpha = 1, foldid = foldid)
+  p_las <- as.numeric(predict(m_las, x_te, s = "lambda.1se"))
+
+  # regression tree, pruned with the 1-SE rule on the blocked folds
+  ctrl   <- rpart.control(cp = 0.0005, minsplit = 30, minbucket = 10, xval = foldid)
+  t_full <- rpart(f, data = train, control = ctrl)
+  cpt    <- as.data.frame(t_full$cptable)
+  best   <- which.min(cpt$xerror)
+  thr    <- cpt$xerror[best] + cpt$xstd[best]
+  cp_1se <- cpt$CP[which(cpt$xerror <= thr)[1]]
+  m_tree <- prune(t_full, cp = cp_1se)
+  p_tree <- predict(m_tree, test)
+
+  # random forest, small grid tuned on the blocked folds
+  p_n  <- length(feats)
+  grid <- expand.grid(mtry = unique(pmax(1, round(c(1/3, 1/2, 2/3, 1) * p_n))),
+                      min.node.size = c(5, 20))
+  cols_rf <- c("log_real_m2", feats)
+  cv_rmse <- map_dbl(seq_len(nrow(grid)), function(i) {
+    errs <- map_dbl(sort(unique(foldid)), function(k) {
+      fit <- ranger(f, data = train[foldid != k, cols_rf], num.trees = 300,
+                    mtry = grid$mtry[i], min.node.size = grid$min.node.size[i],
+                    respect.unordered.factors = "order", seed = 462)
+      pr <- predict(fit, train[foldid == k, feats])$predictions
+      mean((train$log_real_m2[foldid == k] - pr)^2)
+    })
+    sqrt(mean(errs))
+  })
+  b <- which.min(cv_rmse)
+  m_rf <- ranger(f, data = train[, cols_rf], num.trees = 500,
+                 mtry = grid$mtry[b], min.node.size = grid$min.node.size[b],
+                 importance = "permutation", respect.unordered.factors = "order", seed = 462)
+  p_rf <- predict(m_rf, test[, feats])$predictions
+
+  preds <- tibble(year = test$year, y = test$log_real_m2,
+                  `Linear` = p_lm, `Lasso` = p_las, `Tree` = p_tree, `Forest` = p_rf)
+  list(feats = feats, m_lm = m_lm, m_las = m_las, m_tree = m_tree, m_rf = m_rf,
+       x_tr = x_tr, rf_params = grid[b, ], cp = cp_1se, preds = preds)
+}
+```
+
+```{r fit-all, cache = TRUE, cache.extra = file.mtime(file.path(derived_dir, "rq1_frame.rds"))}
+fits <- map(sets, fit_set)
+```
+
+# Test performance
+
+All errors are on the log scale, on district-quarters from 2020 onwards. An RMSE of 0.10 means predictions are typically about 10% off in real dollars per square metre.
+
+```{r results}
+results <- imap_dfr(fits, function(fit, set_name) {
+  fit$preds %>%
+    pivot_longer(c(Linear, Lasso, Tree, Forest), names_to = "model", values_to = "pred") %>%
+    group_by(model) %>%
+    summarise(rmse = rmse(y, pred), mae = mae(y, pred), r2 = oos_r2(y, pred), .groups = "drop") %>%
+    mutate(feature_set = set_name)
+}) %>%
+  mutate(model = factor(model, levels = c("Linear", "Lasso", "Tree", "Forest")))
+
+baseline <- tibble(feature_set = "Predict the training mean",
+                   model = "Baseline",
+                   rmse = rmse(test$log_real_m2, mean(train$log_real_m2)),
+                   mae  = mae(test$log_real_m2,  mean(train$log_real_m2)),
+                   r2   = oos_r2(test$log_real_m2, mean(train$log_real_m2)))
+
+bind_rows(baseline, mutate(results, model = as.character(model))) %>%
+  select(feature_set, model, rmse, mae, r2) %>%
+  kable(digits = 3, caption = "Test-set error by feature set and model")
+```
+
+```{r results-plot}
+results %>%
+  ggplot(aes(x = model, y = rmse, fill = feature_set)) +
+  geom_col(position = "dodge") +
+  labs(title = "Test RMSE by model and feature set",
+       x = NULL, y = "RMSE (log real $/m²)", fill = NULL) +
+  theme(legend.position = "top") +
+  guides(fill = guide_legend(nrow = 3))
+```
+
+The tuning choices behind these numbers:
+
+```{r tuning}
+imap_dfr(fits, ~ tibble(feature_set = .y,
+                        lasso_lambda_1se = .x$m_las$lambda.1se,
+                        tree_cp = .x$cp,
+                        tree_leaves = sum(.x$m_tree$frame$var == "<leaf>"),
+                        rf_mtry = .x$rf_params$mtry,
+                        rf_min_node = .x$rf_params$min.node.size)) %>%
+  kable(digits = 4, caption = "Chosen hyperparameters")
+```
+
+## Where the models fail
+
+The tree and the forest can only return values they saw in training. If real costs in 2020-2026 are above that range, they will under-predict later years while the linear models carry on the trend. The average test residual by year shows whether this happens.
+
+```{r residuals-by-year}
+fits[[2]]$preds %>%
+  pivot_longer(c(Linear, Lasso, Tree, Forest), names_to = "model", values_to = "pred") %>%
+  mutate(resid = y - pred) %>%
+  group_by(year, model) %>%
+  summarise(mean_resid = mean(resid), .groups = "drop") %>%
+  ggplot(aes(x = year, y = mean_resid, colour = model)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_line(linewidth = 0.9) +
+  labs(title = "Mean test residual by year, feature set B",
+       x = "Year", y = "Mean (actual - predicted), log real $/m²", colour = NULL) +
+  theme(legend.position = "top")
+```
+
+# What drives the cost
+
+The interpretation uses one feature set, chosen here. Set B has the building and market features plus time, without the district identity. Change `main_set` to look at another.
+
+```{r main-set}
+main_set <- names(sets)[2]
+main <- fits[[main_set]]
+main_set
+```
+
+## Linear regression and lasso
+
+The numeric features are standardised, so a coefficient is the change in log real $/m² for a one standard deviation change in that feature, with the others held fixed.
+
+```{r lm-coefs}
+coef_lm <- summary(main$m_lm)$coefficients %>%
+  as.data.frame() %>%
+  rownames_to_column("term") %>%
+  filter(term != "(Intercept)", !str_starts(term, "area")) %>%
+  arrange(desc(abs(`t value`)))
+kable(coef_lm, digits = 3, caption = "Linear regression, standardised coefficients")
+```
+
+```{r lasso-coefs}
+lasso_coef <- coef(main$m_las, s = "lambda.1se")
+coef_las <- tibble(term = rownames(lasso_coef), coefficient = as.numeric(lasso_coef)) %>%
+  filter(term != "(Intercept)", coefficient != 0) %>%
+  arrange(desc(abs(coefficient)))
+kable(coef_las, digits = 3, caption = "Lasso, coefficients kept at lambda.1se")
+```
+
+Features the lasso shrinks to zero are ones the other features already explain.
+
+## Regression tree
+
+```{r tree-plot, fig.width = 10, fig.height = 6, out.width = '100%'}
+rpart.plot(main$m_tree, type = 4, extra = 101, under = TRUE, faclen = 0, cex = 0.7,
+           main = "Pruned regression tree (log real $/m²)")
+```
+
+## Random forest
+
+Importance here is permutation importance: how much the forest's error grows when a feature's values are shuffled.
+
+```{r rf-importance}
+rf_imp <- tibble(feature = names(main$m_rf$variable.importance),
+                 importance = as.numeric(main$m_rf$variable.importance)) %>%
+  arrange(desc(importance))
+
+ggplot(rf_imp, aes(x = importance, y = fct_reorder(feature, importance))) +
+  geom_col(fill = "#C76B0A") +
+  labs(title = "Random forest permutation importance",
+       x = "Increase in OOB error when shuffled", y = NULL)
+```
+
+Partial dependence for the three most important numeric features shows the shape of the relationship, which a linear coefficient cannot.
+
+```{r pdp, fig.width = 9, fig.height = 4}
+top3 <- rf_imp %>% filter(feature %in% names(train)[map_lgl(train, is.numeric)]) %>%
+  slice_head(n = 3) %>% pull(feature)
+
+pdp_one <- function(feat) {
+  grid <- seq(quantile(train[[feat]], 0.02), quantile(train[[feat]], 0.98), length.out = 20)
+  base <- train[sample(nrow(train), min(1000, nrow(train))), main$feats]
+  yhat <- map_dbl(grid, function(g) {
+    d <- base; d[[feat]] <- g
+    mean(predict(main$m_rf, d)$predictions)
+  })
+  tibble(feature = feat, x = grid, y = yhat)
+}
+
+map_dfr(top3, pdp_one) %>%
+  ggplot(aes(x = x, y = exp(y))) +
+  geom_line(colour = "#C76B0A", linewidth = 1) +
+  facet_wrap(~ feature, scales = "free_x") +
+  scale_y_continuous(labels = scales::dollar) +
+  labs(title = "Partial dependence of real $/m² on the top features",
+       x = "Feature value", y = "Predicted real $/m²")
+```
+
+## Do the models agree?
+
+The features to trust are the ones every model ranks highly. Each column is a rank, with 1 as the most important.
+
+```{r agreement}
+feats_main <- main$feats
+
+las_imp <- map_dbl(feats_main, function(f) {
+  m <- abs(as.numeric(lasso_coef))[startsWith(rownames(lasso_coef), f)]
+  if (length(m) == 0) 0 else max(m)
+})
+
+tree_imp <- main$m_tree$variable.importance
+tree_imp <- map_dbl(feats_main, ~ if (.x %in% names(tree_imp)) tree_imp[[.x]] else 0)
+
+tibble(feature = feats_main,
+       lasso  = las_imp,
+       tree   = tree_imp,
+       forest = rf_imp$importance[match(feats_main, rf_imp$feature)]) %>%
+  mutate(across(c(lasso, tree, forest), ~ rank(-.x, ties.method = "min"), .names = "{.col}_rank")) %>%
+  select(feature, ends_with("_rank")) %>%
+  mutate(mean_rank = rowMeans(across(ends_with("_rank")))) %>%
+  arrange(mean_rank) %>%
+  kable(digits = 1, caption = "Feature importance rank by model, feature set B")
+```
+
+## What changes with the district included
+
+Set C adds the district itself. If its test error is much lower than set B's, then much of the cost difference between districts is about the place rather than the building profile and market the features describe.
+
+```{r district-effect}
+results %>%
+  filter(str_starts(feature_set, "B") | str_starts(feature_set, "C")) %>%
+  select(feature_set, model, rmse) %>%
+  pivot_wider(names_from = feature_set, values_from = rmse) %>%
+  kable(digits = 3, caption = "Test RMSE, without and with district")
+```
+
+# Check without Auckland
+
+Auckland is one territorial authority and dominates volume. The same models are refitted without it to see whether it is driving the answer.
+
+```{r no-auckland, cache = TRUE, cache.extra = file.mtime(file.path(derived_dir, "rq1_frame.rds"))}
+auck <- "Auckland"
+train_all <- train; test_all <- test
+
+train <- train_all %>% filter(area != auck) %>% mutate(area = droplevels(area))
+test  <- test_all  %>% filter(area != auck) %>% mutate(area = factor(area, levels = levels(train$area)))
+foldid <- train %>% left_join(year_block, by = "year") %>% pull(fold)
+
+fit_noauck <- fit_set(sets[[2]])
+
+train <- train_all; test <- test_all
+foldid <- train %>% left_join(year_block, by = "year") %>% pull(fold)
+```
+
+```{r no-auckland-table}
+fit_noauck$preds %>%
+  pivot_longer(c(Linear, Lasso, Tree, Forest), names_to = "model", values_to = "pred") %>%
+  group_by(model) %>%
+  summarise(rmse = rmse(y, pred), mae = mae(y, pred), .groups = "drop") %>%
+  kable(digits = 3, caption = "Feature set B without Auckland, test error")
+
+tibble(feature = names(fit_noauck$m_rf$variable.importance),
+       importance = as.numeric(fit_noauck$m_rf$variable.importance)) %>%
+  arrange(desc(importance)) %>%
+  kable(digits = 4, caption = "Random forest importance without Auckland")
+```
+
+# Summary to fill in
+
+Write these once the numbers above are in front of you. Each should be a sentence or two.
+
+1. **Which model predicts best on 2020 onwards**, and by how much over the training-mean baseline.
+2. **Whether the tree and forest lose to the linear models** because of the extrapolation problem shown in the residual plot.
+3. **The features that rank high in all models.** These are the answer to "what drives it".
+4. **What the district adds** (set C against set B).
+5. **Whether the result survives dropping Auckland.**
+6. **The limits**: association not cause, one release, features measured at quarter level, small districts with few houses.
+
+*End of document*
