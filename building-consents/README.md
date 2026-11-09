@@ -1,98 +1,159 @@
-# Building Consents: STAT462 Group Project (Group 8, *while True: learn()*)
+# What New Zealand builds, where, and at what cost
 
-Niwesh Baraj, Andrew Boulton, Harish Sahadev M
+**STAT462 Data Mining, Assessment 1 (group project)**
+Group 8, *while True: learn()*: Niwesh Baraj, Andrew Boulton, Harish Sahadev M
 
-Machine-learning analysis of Stats NZ *Building consents issued: August 2026*.
+We analyse 36 years of Stats NZ building-consent data (the *Building consents issued: August 2026* release) to
+answer three questions, one for each family of methods in the course: regression, clustering and classification.
+The analysis is in R Markdown notebooks. The results are presented in a report, a poster, a slide deck and an
+interactive Shiny app.
 
-| RQ | Question | Methods | Status |
+---
+
+## Research questions and findings
+
+| | Question | Methods | Finding |
 |---|---|---|---|
-| 1 | What drives the **real cost per m²** of new houses across districts? | Linear, polynomial, ridge/lasso/elastic net, GAM, tree, random forest, XGBoost, SVM | Done (Steps 1–4) |
-| 2 | What kinds of **building markets** does NZ have? | k-means vs hierarchical clustering | Not started |
-| 3 | Will a district's consents **rise or fall** next year? | Logistic regression, LDA, classification tree | Not started |
+| **RQ1** | What drives the **real cost per m²** of new houses across districts? | Baselines, linear and polynomial regression, ridge / lasso / elastic net, GAM, regression tree, random forest, XGBoost, SVM | Location matters most. Renovation spending (+8% to +11%) and fast growth raise cost; the measured drivers explain about a fifth of the gap between districts. Ridge regression with the district predicts 2020–2026 within 7.9% (MAPE). |
+| **RQ2** | What kinds of **building markets** does New Zealand have? | k-means and hierarchical clustering (four linkages); five criteria for *k*; bootstrap stability | Three markets: house-building districts (30), slow provincial districts (21) and urban medium-density markets (15). The two methods agree on 60 of 66 districts, but the separation is weak: a summary of a continuum. |
+| **RQ3** | Will a district's consents **rise or fall** next year? | Baselines, logistic regression, lasso, LDA, QDA, classification tree, KNN, random forest | Only modestly predictable: logistic regression is right 58% of the time (AUC 0.63), against 53% for the best simple rule. Districts follow the national cycle. |
 
-## Project layout
+How results were obtained: chronological train/test splits, forward-chaining cross-validation within the training
+years, a single use of each test set, and the one-standard-error rule to pick the simplest adequate model.
+
+---
+
+## Repository layout
 
 ```
 Building-Consents-Project/
-├── README.md
-├── Building-Consents-Project.Rproj      open this in RStudio
-├── Building Consents Project — Understanding the Dataset & Questions.md   (in the group repo) guide to the data and the three questions
-├── R/
-│   ├── utils_data.R                     helpers: reading Stats NZ CSVs, periods, GST, saving figures/tables
-│   └── utils_models.R                   helpers: metrics, time-ordered CV folds, generic tuner
-├── data/
-│   ├── raw/                             not in the repository (1.5 GB); see data/raw/README.md
-│   ├── reference/ta_region_concordance.csv   67 districts → region / island
-│   └── processed/                       model-ready data written by Step 1
-├── analysis/
+├── README.md                          this file
+├── Building-Consents-Project.Rproj    open in RStudio
+│
+├── analysis/                          the R Markdown notebooks (each also knitted to .html)
 │   ├── rq1_cost_per_m2/
-│   │   ├── 01_rq1_data_preparation.Rmd  Step 1: check, clean, build features, save
-│   │   ├── 02_rq1_eda.Rmd               Step 2: exploratory analysis, decisions for modelling
-│   │   ├── 03_rq1_models.Rmd            Step 3: tune and compare 11 models, test once, importance
-│   │   └── 04_rq1_interpretation.Rmd    Step 4: partial dependence, errors, answer to RQ1
+│   │   ├── 01_rq1_data_preparation.Rmd   raw Stats NZ tables → district × quarter table, real dollars
+│   │   ├── 02_rq1_eda.Rmd                exploratory analysis and modelling decisions
+│   │   ├── 03_rq1_models.Rmd             11 models, two feature sets, tuning, test, importance
+│   │   └── 04_rq1_interpretation.Rmd     partial dependence, location premium, error analysis
 │   ├── rq2_clustering/
+│   │   ├── 01_rq2_district_features.Rmd  one profile per district, transforms, VIF, PCA
+│   │   └── 02_rq2_clustering.Rmd         k-means vs hierarchical, choosing k, profiles, robustness
 │   └── rq3_rise_fall/
-├── outputs/
-│   ├── figures/rq1/                     PNGs used by the report (fig01–fig28)
-│   ├── tables/rq1/                      CSVs used by the report (t01–t14)
-│   └── models/rq1/                      Step 3 results and the final fitted models
-└── report/
-    ├── group_report.Rmd                 knits to group_report.docx
-    └── group_report.docx
+│       ├── 01_rq3_district_year.Rmd      district × year table, label, features
+│       └── 02_rq3_models.Rmd             classifiers, test, odds ratios, year-by-year errors
+│
+├── R/                                 shared helper functions (printed in each notebook's appendix)
+│   ├── utils_data.R                   reading Stats NZ files, periods, GST, saving figures and tables
+│   ├── utils_models.R                 regression metrics, time-ordered CV folds, generic tuner
+│   ├── utils_cluster.R                VIF, adjusted Rand index, Calinski–Harabasz, bootstrap stability
+│   └── utils_classify.R               AUC, classification metrics, ROC, classifier tuner
+│
+├── app/app.R                          Shiny app: overview + one tab per research question
+├── report/                            group_report.Rmd → group_report.docx (numbered figures, appendices)
+├── communication/
+│   ├── make_figures.R                 plain-language figures for the poster and slides
+│   ├── render_pdf.R                   prints poster / slides HTML to PDF (headless Chrome)
+│   ├── poster/                        poster.html → poster.pdf (A2 portrait)
+│   └── slides/                        build_slides.py → slides.pptx (editable) and slides.pdf
+├── docs/data_dictionary.md            every column of every processed table
+├── tools/make_submission_zip.sh       builds the data-free supplementary zip
+│
+├── data/                              NOT in the submission (see "Data" below)
+│   ├── raw/                           Stats NZ downloads (see data/raw/README.md)
+│   ├── reference/                     district → region lookup (compiled by the group)
+│   └── processed/                     tables written by the notebooks
+└── outputs/
+    ├── figures/rq1|rq2|rq3|app|communication/   all figures (PNG)
+    ├── tables/rq1|rq2|rq3/            all results tables (CSV)
+    └── models/                        saved results and fitted models (regenerated by the notebooks)
 ```
 
-Each notebook's knitted `.html` is kept next to it, so results can be read without running anything.
+---
 
-## How to run
+## Data
 
-1. Open `Building-Consents-Project.Rproj` in RStudio.
-2. Install packages once:
+| Source | Use | Licence |
+|---|---|---|
+| Stats NZ, [*Building consents issued: August 2026*](https://www.stats.govt.nz/information-releases/building-consents-issued-august-2026) (13 CSV tables, 10.4 million rows) | All three questions | CC BY 4.0 |
+| Stats NZ, [*Business price indexes: June 2026 quarter*](https://www.stats.govt.nz/information-releases/business-price-indexes-june-2026-quarter/) (Capital Goods Price Index) | Converting dollars to real June-2026 dollars | CC BY 4.0 |
+| `data/reference/ta_region_concordance.csv` (our own lookup) | District → region and island | |
+
+The data are **not** included in the submission. To reproduce the analysis, download the two releases and place them
+as described in `data/raw/README.md`. All column definitions are in `docs/data_dictionary.md`.
+
+---
+
+## How to reproduce
+
+1. Install R (4.3 or later) and RStudio, then the packages, once:
 
    ```r
-   install.packages(c("tidyverse", "data.table", "knitr", "rmarkdown",
-                      "glmnet", "ranger", "rpart.plot", "xgboost", "e1071"))
+   install.packages(c("tidyverse", "data.table", "knitr", "rmarkdown", "bookdown",
+                      "glmnet", "ranger", "rpart.plot", "xgboost", "e1071",
+                      "shiny", "bslib", "plotly"))
+   # rpart, mgcv, cluster, MASS and class come with R; xgboost must be version 3.x
    ```
 
-   (`rpart` and `mgcv` come with R. The code uses the xgboost 3.x interface.)
-3. Knit in order:
-   1. `01_rq1_data_preparation.Rmd` needs the raw data (see `data/raw/README.md`). Skip it if you only want to
-      re-run the models: its outputs are already in `data/processed/`.
-   2. `02_rq1_eda.Rmd`
-   3. `03_rq1_models.Rmd`: about 15 minutes the first time; slow chunks are then cached
-      (`03_rq1_models_cache/`, delete it to force a full re-run).
-   4. `04_rq1_interpretation.Rmd`: about 1 minute.
-   5. `report/group_report.Rmd` → `report/group_report.docx`.
+2. Open `Building-Consents-Project.Rproj` and knit the notebooks **in this order**. Each writes the files the next
+   one reads, and each finds the project folder by itself.
 
-Notebooks find the project root themselves, so they knit from any working directory.
+   | Order | Notebook | Run time | Writes |
+   |---|---|---|---|
+   | 1 | `analysis/rq1_cost_per_m2/01_rq1_data_preparation.Rmd` | ~15 s (needs raw data) | `data/processed/rq1_*` |
+   | 2 | `analysis/rq1_cost_per_m2/02_rq1_eda.Rmd` | ~10 s | RQ1 figures 6–14 |
+   | 3 | `analysis/rq1_cost_per_m2/03_rq1_models.Rmd` | ~15 min first time, then cached | RQ1 results |
+   | 4 | `analysis/rq1_cost_per_m2/04_rq1_interpretation.Rmd` | ~1 min | final RQ1 models |
+   | 5 | `analysis/rq2_clustering/01_…`, then `02_…` | < 1 min | RQ2 results |
+   | 6 | `analysis/rq3_rise_fall/01_…`, then `02_…` | < 1 min | RQ3 results |
+   | 7 | `report/group_report.Rmd` | ~10 s | `group_report.docx` |
 
-## Data sources
+   Slow chunks are cached in `*_cache/` folders; delete a folder to force a full re-run.
 
-* Stats NZ, *Building consents issued: August 2026*, CC BY 4.0.
-  <https://www.stats.govt.nz/information-releases/building-consents-issued-august-2026>
-* Stats NZ, *Business price indexes: June 2026 quarter*, CC BY 4.0. CGPI series `CEPQ.S611011A` (dwelling units),
-  `CEPQ.S61101` (residential), `CEPQ.S61102` (non-residential).
-  <https://www.stats.govt.nz/information-releases/business-price-indexes-june-2026-quarter/>
+3. **App:** `shiny::runApp("app")`, or open `app/app.R` and click *Run App*. Add `?tab=rq1` (or `rq2`, `rq3`) to
+   the address to open a tab directly.
 
-## Key decisions (RQ1)
+4. **Poster and slides** (optional, after step 2):
 
-1. Unit: district × quarter, complete quarters 1990Q2–2026Q2 (67 × 145 = 9,715 rows).
-2. Response: real $/m² of new houses = value ÷ floor area, GST of the day removed, CGPI-deflated to June-2026 $,
-   15% GST re-applied, modelled as a log. Main response from Step 2 on: **relative cost** = log(district real $/m²)
-   − log(real $/m² of all other districts in the same quarter).
-3. Rows with fewer than 5 new houses are kept in the file but excluded from modelling (8,662 modelled rows).
-4. No predictors derived from house value (leakage).
-5. Chronological split: train ≤ 2019, test 2020–2026Q2. Models train on 1996–2019 so that every predictor is
-   available; Chatham Islands and Kawerau are dropped from modelling (1–2 rows each).
-6. Lagged cost excluded from the main (explanatory) models; island and season dropped (no signal).
-7. Models are tuned by forward-chaining CV (validation blocks 2012–13, 14–15, 16–17, 18–19) and chosen with the
-   one-standard-error rule, on two feature sets (drivers only; drivers + district). The test set is used once.
-8. Chosen models: random forest (drivers set) and ridge regression (district set). Both are refitted on all
-   1996–2026Q2 rows and saved in `outputs/models/rq1/rq1_final_models.rds`.
+   ```bash
+   Rscript communication/make_figures.R          # figures for poster and slides
+   python communication/slides/build_slides.py   # slides.pptx and slides.html (needs: pip install python-pptx)
+   Rscript communication/render_pdf.R poster     # poster.pdf (needs Chrome + install.packages("chromote"))
+   Rscript communication/render_pdf.R slides     # slides.pdf
+   ```
 
-## RQ1 result in one paragraph
+   Without `chromote`, open the `.html` in Chrome and use *Print → Save as PDF* (margins none, background graphics on).
 
-Location matters most. Of the measured drivers, residential alteration spending (a sign of a wealthy, busy market)
-has the largest effect (+8% to +11% from a low to a high value), followed by population growth, especially in the
-fastest-growing places. Districts that build many houses are cheaper per m² for the same alteration spending, but
-any district is dearer in its own busy quarters. The drivers explain about a fifth of the differences between
-districts. With the district included, ridge regression predicts 2020–2026 costs within about 8% (MAPE).
+5. **Supplementary zip:** `bash tools/make_submission_zip.sh` writes `submission/Group8_whileTrue_learn_supplementary.zip`.
+   It contains the code, rendered notebooks, report, app, poster, slides, figures, tables and docs, and checks that
+   no data is included.
+
+---
+
+## Key decisions
+
+* **RQ1 response:** each district's cost *relative to the rest of NZ in the same quarter*, because raw real cost
+  mostly tracks the national price level (time explains 41% of its variation).
+* **No leakage:** no feature is built from house value, and every RQ3 feature is known at the end of the year it
+  describes.
+* **Small counts:** district-quarters with fewer than 5 new houses are not modelled; the Chatham Islands (and, for
+  RQ1, Kawerau) are excluded for having too few rows.
+* **Validation:** train on the past, test once on the most recent years (RQ1: 2020–2026; RQ3: outcomes 2018–2025);
+  tune by forward-chaining cross-validation; choose the simplest model within one standard error of the best.
+* **RQ2 features:** size left out (so clusters describe how markets work, not how big they are); skewed features
+  transformed; redundant features dropped by variance inflation factor.
+
+Details and the reasoning behind each choice are in the notebooks' text and in the report.
+
+---
+
+## Use of AI
+
+We used Claude (Anthropic) to help write and debug R code, explain methods, structure the documents, and edit
+writing. All analysis decisions were made, and all results checked, by the group. This is also acknowledged in the
+report, the poster and the slides.
+
+## Licence and citation
+
+Code: for assessment use by the authors. Data: © Stats NZ, licensed under CC BY 4.0. Cite the data as:
+Stats NZ. (2026). *Building consents issued: August 2026* [Data set]. https://www.stats.govt.nz/

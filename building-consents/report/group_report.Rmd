@@ -1,18 +1,19 @@
 ---
 title: "What New Zealand builds, where, and at what cost"
-subtitle: "STAT462 Data Mining, group project report"
-author: "while True: learn(), Group 8: Niwesh Baraj, Andrew Boulton, Harish Sahadev M"
+subtitle: "STAT462 Data Mining: group project report"
+author: "Group 8, while True: learn(): Niwesh Baraj, Andrew Boulton, Harish Sahadev M"
 date: "`r format(Sys.Date(), '%d %B %Y')`"
 output:
-  word_document:
+  bookdown::word_document2:
     toc: true
     number_sections: true
     fig_width: 6.5
+    fig_caption: true
+    global_numbering: true
 ---
 
 ```{r setup, include = FALSE}
-knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
-                      out.width = "100%")
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, out.width = "100%")
 find_proj_root <- function(path = getwd()) {
   path <- normalizePath(path)
   repeat {
@@ -29,62 +30,642 @@ knitr::opts_knit$set(root.dir = proj_root)
 ```{r load}
 suppressPackageStartupMessages(library(tidyverse))
 library(knitr)
-fig <- function(name) file.path(proj_root, "outputs", "figures", "rq1", paste0(name, ".png"))
-tab <- function(name) read_csv(file.path(proj_root, "outputs", "tables", "rq1", paste0(name, ".csv")),
-                               show_col_types = FALSE)
-full  <- read_csv(file.path(proj_root, "data", "processed", "rq1_district_quarter_full.csv"),
-                  show_col_types = FALSE)
+
+fig_path <- function(rq, name) file.path(proj_root, "outputs", "figures", rq, paste0(name, ".png"))
+tab_of   <- function(rq, name) read_csv(file.path(proj_root, "outputs", "tables", rq, paste0(name, ".csv")),
+                                        show_col_types = FALSE)
+f0  <- function(x) format(round(x), big.mark = ",")
+p0  <- function(x) paste0(round(100 * x), "%")
+p1  <- function(x) paste0(format(round(100 * x, 1), nsmall = 1), "%")
+r2d <- function(x) sprintf("%.2f", x)
+
+# ---- RQ1 numbers ----
+full  <- read_csv(file.path(proj_root, "data", "processed", "rq1_district_quarter_full.csv"), show_col_types = FALSE)
 model <- full |> filter(in_model)
-nz    <- tab("t02_nz_annual_cost_m2")
-split <- tab("t03_split_sizes")
-f0 <- function(x) format(round(x), big.mark = ",")
+nz    <- tab_of("rq1", "t02_nz_annual_cost_m2")
+ve    <- tab_of("rq1", "t05_variance_explained")
+cv1   <- tab_of("rq1", "t08_cv_results")
+test1 <- tab_of("rq1", "t09_test_results")
+eff1  <- tab_of("rq1", "t12_effect_sizes")
+cv1v  <- function(m, s, col = "cv_rmse")   cv1[[col]][cv1$model == m & cv1$set == s]
+t1v   <- function(m, s, col = "test_rmse") test1[[col]][test1$model == m & test1$set == s]
+ef1   <- function(f, m) sprintf("%+.1f%%", eff1[[m]][eff1$feature == f])
+
+# ---- RQ2 numbers ----
+k2    <- tab_of("rq2", "t02_choose_k")
+prof2 <- tab_of("rq2", "t04_cluster_profiles")
+aov2  <- tab_of("rq2", "t06_anova")
+loo2  <- tab_of("rq2", "t07_leave_one_feature_out")
+markets <- c("House-building districts", "Slow provincial districts", "Urban medium-density")
+
+# ---- RQ3 numbers ----
+test3 <- tab_of("rq3", "t04_test_results")
+or3   <- tab_of("rq3", "t05_odds_ratios")
+t3v   <- function(m, col = "auc") test3[[col]][test3$model == m]
+or3v  <- function(f) r2d(or3$odds_ratio[or3$feature == f])
 ```
+
+# Summary {-}
+
+We analysed Stats NZ's *Building consents issued: August 2026* release, which records the number, value and floor
+area of building consents issued by every council each month since 1990. Values were converted to June-2026 dollars
+with the Capital Goods Price Index, so that every year is on the same price basis. We asked three questions, one for
+each family of methods in the course.
+
+**RQ1 (regression): What drives the real cost per m² of new houses across districts?** We modelled each district's
+cost relative to the rest of New Zealand in the same quarter. We compared eleven models, from a baseline to
+XGBoost, tuned by time-ordered cross-validation and tested once on 2020–2026.
+
+* **Location matters most.** Of the measured drivers, residential renovation spending (a sign of a wealthy, busy
+  market) has the largest effect: `r ef1("log_resid_alt_real", "Random forest, drivers")` to
+  `r ef1("log_resid_alt_real", "Ridge, drivers")` from a low to a high value.
+* Fast population growth also raises cost, mostly in the fastest-growing places.
+* The drivers explain about a fifth of the differences between districts.
+* The best model, ridge regression including the district, predicts 2020–2026 cost per m² within about
+  `r p0(t1v("Ridge", "district", "test_mape"))` (mean absolute percentage error). That is only marginally better than
+  each district's own historical average.
+
+**RQ2 (clustering): What kinds of building markets does New Zealand have?** k-means and hierarchical clustering of
+66 districts on nine features give three kinds of market:
+
+* **house-building districts** (commuter belts, lifestyle and retirement areas);
+* **slow provincial districts**;
+* **urban medium-density markets**.
+
+The two methods agree on 60 of 66 districts. But the separation is weak: the groups summarise a continuum rather
+than sharply different types.
+
+**RQ3 (classification): Will a district's consents rise or fall next year?** Only modestly better than chance.
+Logistic regression, the simplest of the best models, classifies `r p0(t3v("Logistic regression", "accuracy"))` of
+district-years correctly in 2018–2025 (AUC `r r2d(t3v("Logistic regression"))`); the best simple rule scores
+`r p0(t3v("Opposite of this year", "accuracy"))`. Districts rise and fall together with the national building cycle,
+whose turning points these data cannot foresee.
+
+An interactive Shiny app lets readers explore all three questions (Section \@ref(app)).
 
 # Introduction
 
-Building consents are permits issued by councils before building work can start. Stats NZ publishes, every month,
-the number, declared value and floor area of the consents issued in each district, by building type. We use the
-*Building consents issued: August 2026* release to answer three questions:
+Building consents are permits issued by councils before building work can start. Because a consent comes before
+construction, consents are a leading indicator of what will be built, where, and at what declared cost. Stats NZ
+publishes monthly consent statistics for every district, by building type, as open data.
+
+We use the *Building consents issued: August 2026* release to answer three questions:
 
 1. **RQ1 (regression):** What drives the real cost per m² of new houses across districts?
 2. **RQ2 (clustering):** What kinds of building markets does New Zealand have?
 3. **RQ3 (classification):** Will a district's consents rise or fall next year?
 
-RQ1 is complete: data preparation, exploratory analysis, models and interpretation. The RQ2 and RQ3 sections are
-still to be written.
+Section \@ref(data) describes the data and the preparation shared by all three questions. Sections \@ref(rq1) to
+\@ref(rq3) answer the questions in turn, each in the same order: approach, methods, results and answer. Section
+\@ref(discussion) discusses the results together. The appendices hold supporting figures and tables and describe how
+to reproduce the analysis.
 
-# Data
+# Data and preparation {#data}
 
-## Source
+## Sources
 
-* **Stats NZ, Building consents issued: August 2026** (CC BY 4.0): 13 CSV tables, 10.4 million rows in total.
-  The main table for RQ1 is *Building consents by territorial authority (Monthly)*: 4.35 million rows, one row
-  per series per month, covering 67 districts from April 1990 to August 2026.
-* **Stats NZ, Business price indexes: June 2026 quarter**: the Capital Goods Price Index (CGPI) for
-  dwelling units (series `CEPQ.S611011A`), used to convert dollars of the day into June-2026 dollars.
-* A district-to-region lookup we compiled (67 districts → 16 regions).
+* **Stats NZ, *Building consents issued: August 2026*** (CC BY 4.0): 13 CSV tables, 10.4 million rows. The main table
+  is *Building consents by territorial authority (Monthly)*: 4.35 million rows, one row per series and month, for 67
+  districts from April 1990 to August 2026. Each row is an aggregate, for example "Queenstown-Lakes District, new
+  houses, floor area, August 2026 = 13,139 m²". Building types are nested (houses within dwelling units within
+  residential buildings), so values are never summed across types.
+* **Stats NZ, *Business price indexes: June 2026 quarter***: the Capital Goods Price Index (CGPI) for dwelling units,
+  used to remove building-cost inflation.
+* **A district-to-region lookup** we compiled (67 districts → 16 regions). It reproduces Stats NZ's regional totals
+  to within 1.3%.
 
-## What one row means
+## Checks and preparation
 
-Each row of the raw table is an *aggregate*, not an individual consent: for example, "Queenstown-Lakes District,
-new houses, floor area, August 2026 = 13,139 m²". Building types are nested (houses ⊂ dwelling units ⊂ residential
-buildings ⊂ all buildings), so values must never be summed across types. Floor area is recorded for new work only.
+Before building anything we confirmed that the table is complete (68 areas × 437 months, no missing values) and
+internally consistent:
 
-# Data preparation for RQ1
+* dwelling units equal the sum of their four sub-types in every district and month;
+* the districts add up exactly to the national total.
 
-## Checks on the raw data
+The main preparation steps were:
 
-Before building anything we confirmed that the table is complete and internally consistent:
+* **Monthly to quarterly (RQ1) or yearly (RQ3):** single months are too noisy for small districts. Only complete
+  quarters and years are used.
+* **GST:** consent values include GST, which rose from 12.5% to 15% in October 2010. We removed the GST of the day and
+  re-applied 15%, which avoids a false 2.2% jump in 2010.
+* **Inflation:** values were deflated with the CGPI for dwelling units to June-2026 dollars.
+* **Small counts:** district-quarters with fewer than five new houses give unstable ratios (Appendix
+  A). They are kept in the data but excluded from RQ1 modelling.
 
-* the grid is complete (68 areas × 437 months, no missing values);
-* every value has final status;
-* dwelling units equal the sum of their four sub-types in every district-month;
-* districts add up exactly to the New Zealand total for count, floor area and value; and
-* our district-to-region lookup reproduces Stats NZ's regional totals to within 1.3% (nine regions exactly).
+```{r fig-nominal-real, fig.cap = "National consented value per m² of new houses, in dollars of the day and in June-2026 dollars."}
+include_graphics(fig_path("rq1", "fig02_nz_nominal_vs_real"))
+```
 
-## From monthly records to a modelling table
+Figure \@ref(fig:fig-nominal-real) shows why the inflation adjustment matters. In nominal terms, the value per m² of a
+new house rose from $`r f0(nz$nominal[nz$year == 1991])` in 1991 to $`r f0(nz$nominal[nz$year == 2025])` in 2025, a
+factor of `r round(nz$nominal[nz$year == 2025] / nz$nominal[nz$year == 1991], 1)`. In real terms it rose by only
+`r round(100 * (nz$real[nz$year == 2025] / nz$real[nz$year == 1991] - 1))`%. Almost all of the headline increase is
+building-cost inflation.
 
-```{r decisions}
+**Validation.** All supervised models use a **chronological** split: train on earlier years, test on the most recent
+years, and tune only within the training years. Districts move together with the national cycle, so a random split
+would put quarters from the same year in both sets and overstate accuracy.
+
+# RQ1: What drives the real cost per m² of new houses? {#rq1}
+
+## Approach
+
+**Response.** Real cost per m² mixes two things: the whole country getting dearer or cheaper over time, and some
+districts being dearer than others. On the training years, time explains
+`r p0(ve[[2]][ve$grouping == "Quarter (time)"])` of the variation in log real cost, and the district only
+`r p0(ve[[2]][ve$grouping == "District"])` (Figure \@ref(fig:fig-variance)). RQ1 asks about differences *across
+districts*, so the main response is **relative cost**: the log of a district's real $/m² minus the log of the real
+$/m² of all *other* districts in the same quarter. A value of +0.10 means about 10% dearer than the rest of New
+Zealand at that time.
+
+```{r fig-variance, fig.cap = "Share of the variance of each response explained by place and time on their own (training rows)."}
+include_graphics(fig_path("rq1", "fig07_variance_explained"))
+```
+
+**Features.** Nine numeric drivers were built for each district-quarter:
+
+* residential alteration spending and new non-residential building (real dollars);
+* the number of new houses, and the year-on-year change in houses;
+* new dwellings per 1,000 residents;
+* the shares of multi-unit, apartment and retirement dwellings;
+* house size relative to the rest of New Zealand.
+
+No feature uses house value, which is part of the response.
+
+**Data.** Models were trained on 1996–2019, so that every feature is available. That is `r f0(sum(model$split == "train" & model$year >= 1996) - 2)`
+district-quarters; the Chatham Islands and Kawerau, with only 1–2 usable rows, were dropped. They were tested once on
+2020Q1–2026Q2. Exploratory analysis of the training years (Appendix B) showed that districts keep their
+ranking over time (correlation 0.73 between the training and test periods). It also showed that house size is
+confounded with time, and that the activity measures overlap (variance inflation factors up to about 6).
+
+## Methods
+
+We fitted eleven models in order of increasing flexibility:
+
+* two baselines: the overall mean, and each district's own mean;
+* linear regression and polynomial regression;
+* ridge, elastic net and lasso;
+* a generalised additive model;
+* a regression tree, a random forest and XGBoost;
+* a support vector machine with a radial kernel.
+
+Each model was fitted with two feature sets:
+
+* **drivers:** the nine features plus region and a city flag. The district name is left out, so any location effect
+  must come from measurable features.
+* **drivers + district:** the nine features plus the district.
+
+The gap between the two sets shows how much of the location effect the drivers fail to explain.
+
+Hyperparameters were tuned by **forward-chaining cross-validation** on the training years: four folds, each training
+on all years before a two-year validation block (2012–13, 2014–15, 2016–17, 2018–19). Models were compared on mean
+cross-validated RMSE of the log response (an error of 0.10 is about 10%). Among models within one standard error of
+the best, the simplest was chosen (the one-standard-error rule).
+
+## Results
+
+```{r tab-rq1}
+keep <- tribble(~model, ~set,
+  "Overall mean", "none", "District mean", "none",
+  "Linear regression", "drivers", "Random forest", "drivers", "XGBoost", "drivers", "SVM (radial)", "drivers",
+  "Linear regression", "district", "Ridge", "district", "Lasso", "district", "GAM (splines)", "district",
+  "XGBoost", "district")
+keep |>
+  left_join(cv1 |> select(model, set, cv_rmse, cv_r2), by = c("model", "set")) |>
+  left_join(test1 |> select(model, set, test_rmse, test_r2, test_mape), by = c("model", "set")) |>
+  mutate(set = recode(set, none = "baseline", drivers = "drivers", district = "drivers + district"),
+         test_mape = 100 * test_mape) |>
+  kable(digits = 3, col.names = c("Model", "Feature set", "CV RMSE", "CV R²", "Test RMSE", "Test R²", "Test MAPE (%)"),
+        caption = "Selected RQ1 models: cross-validated (1996–2019) and test (2020–2026) performance. All models are listed in Appendix B.")
+```
+
+```{r fig-cv1, fig.cap = "Cross-validated RMSE (±1 standard error) of every model. Dashed line: district-mean baseline."}
+include_graphics(fig_path("rq1", "fig19_cv_comparison"))
+```
+
+Table \@ref(tab:tab-rq1) and Figure \@ref(fig:fig-cv1) show three results:
+
+* **Drivers only:** the flexible models (random forest, XGBoost, SVM) explain about a third of the variation (CV R²
+  ≈ `r r2d(cv1v("SVM (radial)", "drivers", "cv_r2"))`), against about a quarter for the linear models. So the drivers act
+  non-linearly and interact. But none clearly beats simply predicting each district's own average.
+* **Drivers + district:** the penalised linear models are best (CV R² ≈ `r r2d(cv1v("Lasso", "district", "cv_r2"))`).
+  Once each district has its own level, the remaining effects are close to additive and linear.
+* **Test years:** every model is worse than in cross-validation, the baselines included. Relative costs were more
+  spread out during the COVID period and the 2021–22 boom. The chosen ridge model's MAPE is
+  `r p1(t1v("Ridge", "district", "test_mape"))`, against `r p1(t1v("District mean", "none", "test_mape"))` for the
+  district mean.
+
+The one-standard-error rule chose a **random forest** for the drivers set and **ridge regression** for the district
+set.
+
+```{r fig-importance, fig.cap = "Variable importance from three models (drivers set): lasso standardised coefficients, random-forest permutation importance and XGBoost gain. Colour shows the direction in the lasso."}
+include_graphics(fig_path("rq1", "fig22_variable_importance"))
+```
+
+```{r fig-pdp, fig.cap = "Partial dependence of predicted relative cost on six drivers. x-axis: percentile of the feature among training rows; panel titles give the 5th to 95th percentile range."}
+include_graphics(fig_path("rq1", "fig24_partial_dependence"))
+```
+
+**What drives cost.** Three very different importance measures agree on the main drivers (Figure
+\@ref(fig:fig-importance)). Partial dependence (Figure \@ref(fig:fig-pdp)) shows how each one changes the prediction:
+
+* **Residential alteration spending** has the largest effect in every model:
+  `r ef1("log_resid_alt_real", "Random forest, drivers")` to `r ef1("log_resid_alt_real", "Ridge, drivers")` from the
+  10th to the 90th percentile. It marks wealthier markets with busy trades.
+* **New dwellings per 1,000 residents** raises cost gradually (`r ef1("dwell_per_1000", "Random forest, drivers")` in
+  the forest), with a further jump of about 4% in the fastest-growing tenth of district-quarters. It also interacts
+  with alteration spending: growth adds up to about 14% where alteration spending is high, and little where it is
+  low (Appendix B).
+* **Number of new houses** has opposite effects between and within districts. For the same alteration spending,
+  districts that build many houses are cheaper per m² (volume builders, large subdivisions such as Selwyn). But any
+  one district is dearer in its own busier quarters (`r ef1("log_houses_n", "Ridge, district")` in the district
+  model).
+* **House size, non-residential work and the dwelling mix** each move the prediction by about 2% or less.
+
+```{r fig-premium, fig.cap = "Each district's premium relative to the average district, before (raw average) and after accounting for the measured drivers (ridge, district set). Ten dearest and ten cheapest after drivers."}
+include_graphics(fig_path("rq1", "fig26_district_premium"))
+```
+
+**How much of location the drivers explain.** In the district-set ridge model, each district's coefficient is the
+part of its cost the drivers do not explain. The drivers explain only about a fifth of the variance between district
+averages (Figure \@ref(fig:fig-premium)):
+
+* Queenstown-Lakes remains about 15% dearer than the average district even after its drivers.
+* Auckland and Christchurch move from dearer than average to cheaper than their drivers predict. They have the
+  largest *total* alteration spending in the country, which shows that our activity features partly measure district
+  size rather than wealth.
+
+```{r fig-error-year, fig.cap = "Test RMSE by year for the chosen models and the district-mean baseline, with the spread of actual relative costs (dashed)."}
+include_graphics(fig_path("rq1", "fig27_test_error_by_year"))
+```
+
+**Where the models fail.** Errors were smallest in 2020–2022 and largest in 2024, when the spread between districts
+peaked (Figure \@ref(fig:fig-error-year)). Ridge beat the district-mean baseline until 2023 but not afterwards.
+Errors were also largest for district-quarters with few houses. Coastal and lifestyle districts became dearer than
+predicted after 2020. A finer tuning grid for the random forest chose the same settings, so the errors are not a
+tuning problem.
+
+**Why relative cost.** Models fitted to real $/m² with a time trend fail in characteristic ways after 2019 (Appendix
+B):
+
+* trees and forests flatten at the last level they saw;
+* linear models extend the 1996–2019 trend and overshoot.
+
+The relative response avoids having to forecast the national price level.
+
+## Answer to RQ1
+
+Location matters most. The measured drivers explain a modest part of it (Table \@ref(tab:tab-rq1-answer)).
+
+```{r tab-rq1-answer}
+tribble(
+  ~Driver, ~Direction, ~`Size (10th to 90th percentile)`,
+  "Residential alteration spending", "dearer", "about +8% to +11%",
+  "Region", "varies", "up to about ±10%",
+  "New dwellings per 1,000 residents", "dearer", "about +3% to +6%, more in the fastest-growing places",
+  "Number of new houses", "cheaper between districts, dearer within", "about ±5%",
+  "Relative house size", "slightly cheaper", "about −1% to −2%",
+  "Dwelling mix", "none detected", "under 1%") |>
+  kable(caption = "Answer to RQ1: drivers of relative cost per m².")
+```
+
+With drivers and region only, the best models explain about a third of the variation in relative cost, about as
+much as the district name alone. With the district added, ridge regression predicts 2020–2026 within about 8%.
+Most of the difference between districts lies in factors we do not observe: land, terrain, local labour markets and
+the type of house built.
+
+# RQ2: What kinds of building markets does New Zealand have? {#rq2}
+
+## Approach
+
+RQ2 is unsupervised: there is no response, and we group districts with similar profiles. Each of 66 districts (the
+Chatham Islands excluded, with only 34 new dwellings in ten years) is described over 2016Q3–2026Q2 by nine features:
+
+* **type mix:** shares of new dwellings that are apartments, townhouses/flats/units, and retirement-village units;
+* **intensity:** new dwellings per 1,000 residents per year;
+* **growth:** new dwellings in 2021–26 relative to 2016–21 (log ratio);
+* **volatility:** standard deviation of the yearly change in new dwellings over 2006–2025;
+* **cost:** real $/m² of new houses relative to all other districts;
+* **house size:** average floor area of a new house;
+* **non-residential share:** share of new building value that is non-residential.
+
+District size was deliberately left out, so the clusters describe how a market works rather than how big it is.
+Size is used afterwards to describe the clusters. The feature choices were:
+
+* **transforms:** skewed features were square-root or log transformed, because without this Wellington City formed
+  a cluster of its own purely because of its 39% apartment share;
+* **standardising:** all features were put on the same scale;
+* **redundancy:** two candidate features were dropped. The house share is fixed by the other three shares (infinite
+  variance inflation factor), and the alteration share largely repeated building intensity (VIF ≈ 7). The final nine
+  features all have VIF below 2.5.
+
+## Methods
+
+* **k-means** (50 random starts, Euclidean distance) divides the districts into *k* groups around *k* centres,
+  minimising the within-cluster sum of squares.
+* **Hierarchical clustering** repeatedly merges the closest clusters. We compared four linkages:
+  * single and average linkage split off a few outlying districts and left one huge cluster;
+  * complete linkage still left a cluster of two;
+  * **Ward's** method gave clusters of useful size and shares k-means' objective.
+* **Choosing *k*.** We compared five criteria for *k* = 2 to 8:
+  * the elbow in the within-cluster sum of squares;
+  * the mean silhouette width;
+  * the Calinski–Harabasz index;
+  * the gap statistic;
+  * bootstrap stability: re-clustering resampled districts and measuring agreement with the adjusted Rand index.
+
+```{r fig-choose-k, fig.cap = "Five criteria for the number of k-means clusters."}
+include_graphics(fig_path("rq2", "fig04_choose_k"))
+```
+
+The criteria disagree (Figure \@ref(fig:fig-choose-k)):
+
+* silhouette width and the Calinski–Harabasz index are highest at *k* = 2 and only slightly lower at *k* = 3;
+* bootstrap stability is clearly highest at *k* = 3 (`r r2d(k2$stability[k2$k == 3])`);
+* the gap statistic chooses *k* = 1, and mean silhouette widths are only about 0.2.
+
+So the districts form a continuum rather than well-separated types. We use ***k* = 3** as the most stable and most
+informative summary.
+
+## Results
+
+```{r fig-dendro, fig.cap = "Ward's hierarchical clustering of 66 districts, cut into three clusters."}
+include_graphics(fig_path("rq2", "fig05_dendrogram"))
+```
+
+Ward's three clusters (Figure \@ref(fig:fig-dendro)) agree with k-means on 60 of the 66 districts (adjusted Rand index
+0.75). The six that differ lie on the borders between clusters. k-means was more stable under resampling (0.85 vs
+0.59), so it gives the final grouping.
+
+```{r tab-rq2}
+prof2 |>
+  transmute(Market = markets[cluster], Districts = districts,
+            `Townhouses %` = town_share, `Apartments %` = apt_share, `Retirement %` = retire_share,
+            `Dwellings per 1,000` = dwell_per_1000, `Growth %` = growth, `Volatility %` = volatility,
+            `Cost vs others %` = rel_cost, `House m²` = house_m2, `Non-res %` = nonres_share) |>
+  kable(digits = 1, caption = "Median of each feature in each cluster (natural units).")
+```
+
+```{r fig-clusters, fig.cap = "Districts on the first two principal components of the nine features, coloured by cluster. Ellipses contain about 80% of each cluster."}
+include_graphics(fig_path("rq2", "fig07_clusters_pca"))
+```
+
+The three clusters (Table \@ref(tab:tab-rq2), Figure \@ref(fig:fig-clusters)):
+
+* **House-building districts (30):** commuter belts, lifestyle and retirement areas, and growing rural towns, such
+  as Selwyn, Waimakariri, Waipa, Tasman, Kāpiti Coast and Thames-Coromandel. They have the most new dwellings per
+  resident and the largest houses. Building is mostly stand-alone houses plus retirement villages, is steady, and is
+  slightly cheap.
+* **Slow provincial districts (21):** for example Gore, Clutha, Wairoa, Ōpōtiki, Grey and South Waikato. They build
+  little for their population, building is volatile, a larger share is commercial, houses are smaller, and
+  construction is the cheapest (about 8% below other districts).
+* **Urban medium-density markets (15):** the main cities plus Queenstown-Lakes, Gisborne and Hastings. A third of new
+  dwellings are townhouses or flats, construction is the dearest (about 5% above other districts), and these are the
+  largest markets.
+
+```{r fig-centres, fig.cap = "Cluster centres in standard deviations from the average district."}
+include_graphics(fig_path("rq2", "fig06_cluster_centres"))
+```
+
+**What separates the clusters.** A one-way ANOVA of each feature on the clusters, used only to rank features because
+the clusters were formed from these same features, puts **townhouse share, apartment share, building intensity and
+non-residential share** first (η² `r r2d(min(aov2$eta_squared[1:4]))`–`r r2d(max(aov2$eta_squared))`). Growth
+separates the clusters least (η² `r r2d(aov2$eta_squared[aov2$feature == "growth"])`). Figure \@ref(fig:fig-centres)
+shows the same pattern.
+
+**Robustness.** Leaving out any single feature changes the clusters little (adjusted Rand index 0.79 or more), except
+the non-residential share (`r r2d(loo2$ARI_with_final[loo2$left_out == "nonres_share"])`). Leaving out volatility, which
+is partly a small-district effect, gives `r r2d(loo2$ARI_with_final[loo2$left_out == "volatility"])`. Each cluster
+spans both islands and nine or more regions, so the markets are not simply geographic. The urban cluster is the
+loosest: Palmerston North, Tauranga and Hastings sit closer to the house-building districts (Appendix C).
+
+## Answer to RQ2
+
+New Zealand's districts fall into three broad kinds of building market: house-building districts, slow provincial
+districts and urban medium-density markets. They differ mainly in what kind of dwellings are built and how much is
+built per resident. Two different clustering methods agree on most districts and the grouping is stable under
+resampling. But the separation is weak, so the three markets summarise a continuum, and districts near the borders
+could reasonably be placed in a neighbouring group.
+
+# RQ3: Will a district's consents rise or fall next year? {#rq3}
+
+## Approach
+
+Each row is a district and calendar year (66 districts, feature years 1996–2024). The label is 1 if new dwellings
+consented next year exceed this year's; ties (2% of rows) count as "not rising". The classes are balanced (51% rising).
+
+Eleven features use only information available at the end of the year.
+
+Eight describe the district:
+
+* its size and this year's change;
+* its level relative to its own previous five-year average;
+* whether the second half of the year was busier than the first;
+* growth in renovation and non-residential spending;
+* the multi-unit share and dwellings per 1,000 residents.
+
+Three describe New Zealand as a whole: national growth, the national level relative to its five-year average, and
+national second-half momentum.
+
+Models were trained on feature years 1996–2016 and tested once on 2017–2024 (outcomes 2018–2025).
+
+```{r fig-share-rising, fig.cap = "Share of districts whose new dwellings rose, by year. Colour shows whether the national total rose."}
+include_graphics(fig_path("rq3", "fig01_share_rising_by_year"))
+```
+
+Figure \@ref(fig:fig-share-rising) shows the central difficulty. The share of districts rising swings from 12% (2009)
+to 88% (2021), because districts mostly move together with the national building cycle. Which year it is explains
+about 17% of the variation in the label on its own, which caps how well any district-level model can do.
+
+## Methods
+
+The comparison starts from three baselines:
+
+* always predict the majority class;
+* predict the same direction as this year;
+* predict the opposite direction.
+
+The models were the pitch's **logistic regression, LDA and classification tree**, plus four others:
+
+* **QDA**, which allows a curved boundary;
+* **lasso logistic regression;**
+* **k-nearest neighbours;**
+* a **random forest**, to test whether a flexible model finds structure the linear ones miss.
+
+Each model outputs a probability of a rise, classified at 0.5. Settings (λ, tree complexity, *k*, forest settings)
+were tuned by forward-chaining cross-validation on the training years, using validation blocks 2009–10 to 2015–16 and
+AUC. The final model was chosen with the one-standard-error rule.
+
+## Results
+
+```{r tab-rq3}
+test3 |>
+  transmute(Model = model, `Test accuracy` = accuracy, `Balanced accuracy` = balanced_accuracy,
+            `Test AUC` = auc, Brier = brier, `CV AUC` = cv_auc) |>
+  kable(digits = 3, caption = "RQ3 classifiers on the test years (outcomes 2018–2025) and in cross-validation.")
+```
+
+```{r fig-roc, fig.cap = "ROC curves on the test years for four models and the best simple rule."}
+include_graphics(fig_path("rq3", "fig04_roc_test"))
+```
+
+**Model comparison.** Logistic regression, lasso logistic regression and LDA were joint best in cross-validation (AUC
+about 0.68), and the one-standard-error rule chose plain logistic regression. On the test years it classified
+`r p0(t3v("Logistic regression", "accuracy"))` of district-years correctly (AUC
+`r r2d(t3v("Logistic regression"))`, Table \@ref(tab:tab-rq3)). The simple rules scored lower:
+
+* always predicting a rise: `r p0(t3v("Majority class", "accuracy"))`;
+* the same direction as this year: `r p0(t3v("Same as this year", "accuracy"))`;
+* the opposite direction: `r p0(t3v("Opposite of this year", "accuracy"))`.
+
+LDA gave the same results, because with two classes both methods draw a linear boundary. The flexible models did not
+improve on it:
+
+* QDA, k-nearest neighbours and the random forest scored lower, and their tuned settings were the smoothest
+  available (k = 301 neighbours; large forest leaves);
+* a single tree was close to chance.
+
+```{r fig-by-year3, fig.cap = "Logistic regression: mean predicted probability of a rise and the actual share of districts rising, by year."}
+include_graphics(fig_path("rq3", "fig05_test_by_year"))
+```
+
+**Year by year** (Figure \@ref(fig:fig-by-year3)), the model follows the national direction only weakly:
+
+* it leaned towards rises in 2021 and towards falls in 2023–24, but far less strongly than what happened;
+* it missed the turning points in 2018 and 2025;
+* within a single year, its ability to rank which districts will rise is limited (average within-year AUC 0.59).
+
+```{r fig-or, fig.cap = "Logistic regression: odds ratios for a one-standard-deviation increase in each feature, with 95% intervals (training years)."}
+include_graphics(fig_path("rq3", "fig06_odds_ratios"))
+```
+
+**What predicts a rise** (Figure \@ref(fig:fig-or)):
+
+* **National features have the largest effects.** A rise is more likely when the country is building above its
+  five-year average (odds ratio `r or3v("nat_dev_5y")` per standard deviation) and finished the year strongly
+  (`r or3v("nat_h2_vs_h1")`). Holding these fixed, a sudden national jump this year makes a rise less likely
+  (`r or3v("nat_growth_1y")`).
+* **Locally,** growing renovation spending and a strong second half raise the odds. A high multi-unit share (lumpy
+  apartment and townhouse projects), high building intensity and being above the district's own five-year average
+  lower them.
+* **The intervals are optimistic,** because district-years in the same year are not independent.
+
+A version of the label with the national cycle removed (did the district grow faster than the rest of New Zealand?)
+was no easier to predict (test AUC 0.55).
+
+## Answer to RQ3
+
+Using the consents data alone, next year's direction can be predicted only modestly better than chance: about 58%
+accuracy, against 53% for the best simple rule. The main obstacle is that districts follow the national cycle, whose
+turning points depend on economic conditions (interest rates, migration, credit) that are not in these data.
+
+# Interactive app {#app}
+
+The Shiny app `app/app.R` presents the three questions for readers who want to explore the results rather than read
+code. It uses only the saved models and processed data.
+
+* **RQ1:** select a district and move sliders for its drivers to see both final models' predicted cost per m², next
+  to the actual cost and its history.
+* **RQ2:** see each district's market, and which market any profile set on the sliders would belong to.
+* **RQ3:** see each district's probability of a rise in 2026, with "what if" sliders.
+
+The app shows the RQ3 accuracy next to every probability, so that readers do not mistake it for a reliable forecast.
+Figure \@ref(fig:fig-app) shows the RQ1 tab.
+
+```{r fig-app, fig.cap = "The RQ1 tab of the app: predicted and actual cost per m² for Selwyn District, with sliders for each driver."}
+include_graphics(file.path(proj_root, "outputs", "figures", "app", "app_rq1.png"))
+```
+
+# Discussion {#discussion}
+
+**One theme runs through all three questions: place and the national cycle dominate, and the measurable features
+add only a modest amount.**
+
+* In RQ1, location explains most of the differences in cost, and the drivers about a fifth.
+* In RQ2, districts form a continuum rather than sharply different types.
+* In RQ3, the national cycle swamps district-level signals.
+
+The questions also connect directly. RQ2's urban medium-density markets are the dearest to build in (+5%) and its
+slow provincial districts the cheapest (−8%), consistent with RQ1's finding that busier, denser markets cost more.
+
+**Simple models were usually enough.**
+
+* In RQ1, flexible models helped only when the district was left out.
+* In RQ3, logistic regression matched every flexible model.
+
+The flexible models' tuned settings were consistently the smoothest available, a sign of weak and mostly linear
+signals. Time-ordered validation, a single use of the test set and the one-standard-error rule kept the comparisons
+honest. Where a result was weak (RQ2's cluster separation, RQ3's accuracy), we report it rather than search for
+settings that would hide it.
+
+**Limitations.**
+
+* **What the data measure (RQ1):** consented value is the builder's estimate at consent time, not the final cost,
+  and it excludes land. The activity features are total dollars, so they partly measure district size; population
+  estimates were not in this release. Land prices, house specification and builder type are not observed.
+* **Observational data:** all relationships are associations, not causal effects.
+* **Coverage:** Auckland is treated as one district, and district-quarters with fewer than five new houses are
+  excluded, so the smallest districts are under-represented.
+* **Weak structure (RQ2):** the clusters depend on the chosen features and the ten-year window.
+* **Dependence and missing drivers (RQ3):** district-years in the same year are not independent, and the decisive
+  economic drivers are not in the data.
+* **Drift:** relationships changed after 2023 (RQ1 errors grew), so models used for current decisions would need
+  regular retraining.
+
+**Extensions.**
+
+* RQ1: per-resident activity measures and district house prices.
+* RQ3: interest rates, migration and credit conditions.
+* Splitting Auckland into its local boards.
+
+# Acknowledgements and use of AI {-}
+
+We used Claude (Anthropic), an AI assistant, during this project to help write and debug R code, to explain
+methods, to suggest structure for the notebooks, report, poster and slides, and to edit our writing. Every
+analysis choice (the responses, features, validation design, model selection and interpretation) was discussed
+and checked by the group, and every reported number comes from code we ran and reviewed. Data are from Stats NZ
+under a Creative Commons Attribution 4.0 licence.
+
+# References {-}
+
+Breiman, L. (2001). Random forests. *Machine Learning, 45*(1), 5–32. https://doi.org/10.1023/A:1010933404324
+
+Chen, T., & Guestrin, C. (2016). XGBoost: A scalable tree boosting system. In *Proceedings of the 22nd ACM SIGKDD
+International Conference on Knowledge Discovery and Data Mining* (pp. 785–794). https://doi.org/10.1145/2939672.2939785
+
+Friedman, J., Hastie, T., & Tibshirani, R. (2010). Regularization paths for generalized linear models via coordinate
+descent. *Journal of Statistical Software, 33*(1), 1–22. https://doi.org/10.18637/jss.v033.i01
+
+Hubert, L., & Arabie, P. (1985). Comparing partitions. *Journal of Classification, 2*(1), 193–218.
+https://doi.org/10.1007/BF01908075
+
+James, G., Witten, D., Hastie, T., & Tibshirani, R. (2021). *An introduction to statistical learning: With
+applications in R* (2nd ed.). Springer. https://doi.org/10.1007/978-1-0716-1418-1
+
+Kaufman, L., & Rousseeuw, P. J. (1990). *Finding groups in data: An introduction to cluster analysis*. Wiley.
+https://doi.org/10.1002/9780470316801
+
+R Core Team. (2026). *R: A language and environment for statistical computing* (Version 4.6.1) [Computer software].
+R Foundation for Statistical Computing. https://www.R-project.org/
+
+Stats NZ. (2026a). *Building consents issued: August 2026* [Data set]. Licensed under CC BY 4.0.
+https://www.stats.govt.nz/information-releases/building-consents-issued-august-2026
+
+Stats NZ. (2026b). *Business price indexes: June 2026 quarter* [Data set]. Licensed under CC BY 4.0.
+https://www.stats.govt.nz/information-releases/business-price-indexes-june-2026-quarter/
+
+Tibshirani, R., Walther, G., & Hastie, T. (2001). Estimating the number of clusters in a data set via the gap
+statistic. *Journal of the Royal Statistical Society: Series B, 63*(2), 411–423. https://doi.org/10.1111/1467-9868.00293
+
+Wood, S. N. (2017). *Generalized additive models: An introduction with R* (2nd ed.). CRC Press.
+https://doi.org/10.1201/9781315370279
+
+R packages used: tidyverse, data.table, glmnet, ranger, xgboost, e1071, mgcv, rpart, rpart.plot, cluster, MASS,
+class, knitr, rmarkdown, bookdown, shiny, bslib and plotly.
+
+# Appendix A: Data preparation details {- #app-prep}
+
+```{r tab-prep}
 tribble(
   ~Step, ~`What we did`, ~Why,
   "Unit of analysis", "District × quarter, complete quarters only (1990Q2–2026Q2)", "Monthly district counts are too small and noisy",
@@ -92,443 +673,112 @@ tribble(
   "GST", "Removed GST of the day (12.5% to Sep 2010, 15% after) and re-applied 15%", "Avoids a false +2.2% jump in 2010Q4",
   "Inflation", "Deflated by CGPI (dwelling units) to June-2026 dollars", "Compares every year on one price basis",
   "Small counts", "Rows with fewer than 5 new houses kept but not modelled", "A single unusual house dominates such a quarter",
-  "Response", "log(real $ per m²) and relative cost vs the rest of NZ (see EDA)", "Multiplicative effects; isolates district differences",
-  "Validation", "Train 1990–2019, test 2020–2026", "A random split would leak the national cycle"
-) |> kable(caption = "Preparation decisions for RQ1")
+  "Leakage", "No feature is built from house value", "Value is the numerator of the response",
+  "Validation", "Train to 2019, test 2020–2026Q2", "A random split would leak the national cycle") |>
+  kable(caption = "Preparation decisions for RQ1.")
 ```
 
-## Removing inflation
-
-```{r fig-cgpi, fig.cap = "Capital Goods Price Index for dwelling units vs all residential buildings, rescaled to June 2026 = 1."}
-include_graphics(fig("fig01_cgpi"))
+```{r fig-cgpi, fig.cap = "Capital Goods Price Index for dwelling units and all residential buildings, rescaled to June 2026 = 1."}
+include_graphics(fig_path("rq1", "fig01_cgpi"))
 ```
 
-```{r fig-nz, fig.cap = "National consented value per m² of new houses, nominal vs real."}
-include_graphics(fig("fig02_nz_nominal_vs_real"))
+```{r fig-funnel, fig.cap = "Real $/m² against the number of houses behind each district-quarter. Dashed line: the five-house minimum."}
+include_graphics(fig_path("rq1", "fig03_funnel_small_counts"))
 ```
 
-Nationally, the nominal value per m² of a new house rose from
-$`r f0(nz$nominal[nz$year == 1991])` in 1991 to $`r f0(nz$nominal[nz$year == 2025])` in 2025
-(×`r round(nz$nominal[nz$year == 2025] / nz$nominal[nz$year == 1991], 1)`). In June-2026 dollars the change is from
-$`r f0(nz$real[nz$year == 1991])` to $`r f0(nz$real[nz$year == 2025])`,
-or `r round(100 * (nz$real[nz$year == 2025] / nz$real[nz$year == 1991] - 1))`%. Almost all of the headline increase
-is building-cost inflation; RQ1 is about what is left, especially the differences *between districts*.
-
-## Small counts
-
-```{r fig-funnel, fig.cap = "Real $/m² against the number of houses behind each district-quarter. The dashed line marks the 5-house minimum."}
-include_graphics(fig("fig03_funnel_small_counts"))
-```
-
-`r sum(full$houses_n < 5)` of the `r f0(nrow(full))` district-quarters (`r round(100 * mean(full$houses_n < 5), 1)`%)
-have fewer than five new houses. They are concentrated in a few small districts (Chatham Islands, Kawerau, Wairoa,
-Waitomo) and give very unstable ratios, so they are excluded from modelling.
-
-## The response variable
-
-```{r fig-response, fig.cap = "Distribution of the response among modelled district-quarters."}
-include_graphics(fig("fig04_response_distribution"))
-```
-
-Among the `r f0(nrow(model))` modelled district-quarters the median real cost is
-$`r f0(median(model$real_cost_m2))` per m², with 98% of rows between
-$`r f0(quantile(model$real_cost_m2, .01))` and $`r f0(quantile(model$real_cost_m2, .99))`.
-
-## Candidate drivers
-
-```{r features}
-tribble(
-  ~Feature, ~Meaning,
-  "Average house size", "Floor area ÷ number of new houses (m²)",
-  "Volume", "log(number of new houses in the quarter)",
-  "Multi-unit share", "Share of new dwellings that are apartments, townhouses or retirement units",
-  "Building intensity", "New dwellings in the past 12 months per 1,000 residents (from 1996)",
-  "Growth", "Change in new houses vs the same quarter a year earlier",
-  "Other activity", "Real value of residential alterations and of new non-residential building",
-  "Location", "District, region, island, city vs district council",
-  "Time", "Year, quarter, linear trend"
-) |> kable(caption = "Candidate predictors of real $/m²")
-```
-
-No predictor is calculated from house *value*, which is the numerator of the response.
-
-## Training and test sets
-
-```{r split-table}
-split |> rename(Set = split, Period = period, `All rows` = all_rows,
-                `Modelled rows` = modelled_rows, Districts = districts_modelled) |>
-  kable(caption = "Chronological train/test split")
-```
+`r sum(full$houses_n < 5)` of the `r f0(nrow(full))` district-quarters (`r p1(mean(full$houses_n < 5))`) have fewer than
+five new houses. They are concentrated in a few small districts and give very unstable ratios (Figure
+\@ref(fig:fig-funnel)).
 
 ```{r fig-split, fig.cap = "Modelled district-quarters per year in the training and test sets."}
-include_graphics(fig("fig05_train_test_split"))
+include_graphics(fig_path("rq1", "fig05_train_test_split"))
 ```
 
-# RQ1: Exploratory analysis
+# Appendix B: Additional RQ1 results {- #app-rq1}
 
-All exploration uses the training years (1990–2019) only, so that nothing about the test years influences
-modelling choices.
-
-## Two ways to measure cost
-
-Real $/m² mixes two things: the whole country getting dearer or cheaper over time, and some districts being
-dearer than others. Because RQ1 is about districts, we also define a **relative cost**: the log of a district's
-real $/m² minus the log of the real $/m² of *all other* districts in the same quarter. A value of +0.10 means
-about 10% dearer than the rest of New Zealand at that time.
-
-```{r var-expl}
-ve <- tab("t05_variance_explained")
-ve |> mutate(across(-grouping, ~ paste0(round(100 * .x), "%"))) |>
-  rename(Grouping = grouping) |>
-  kable(caption = "Share of variance explained by each grouping on its own (R², training rows)")
+```{r fig-ranking, fig.cap = "Median relative cost by district, 1990–2019 (training years)."}
+include_graphics(fig_path("rq1", "fig08_district_ranking"))
 ```
 
-```{r fig-var, fig.cap = "Variance explained by place and time, for each response."}
-include_graphics(fig("fig07_variance_explained"))
+```{r fig-confounding, fig.cap = "House size and cost: across all years (A) and within the same quarter (B). The apparent link in A comes from both growing over time."}
+include_graphics(fig_path("rq1", "fig10_house_size_confounding"))
 ```
 
-Time explains `r round(100 * ve[[2]][ve$grouping == "Quarter (time)"])`% of the variation in log real cost, and district
-`r round(100 * ve[[2]][ve$grouping == "District"])`%. For relative cost, district explains
-`r round(100 * ve[[3]][ve$grouping == "District"])`%, while region, island and season explain little or nothing.
-
-```{r fig-time, fig.cap = "National real value per m² of new houses by quarter; the shaded area is the test period."}
-include_graphics(fig("fig06_nz_quarterly_trend"))
+```{r fig-persist, fig.cap = "Mean relative cost by district in the training and test periods."}
+include_graphics(fig_path("rq1", "fig14_district_persistence"))
 ```
-
-## Which districts are dear or cheap?
-
-```{r fig-rank, fig.cap = "Median relative cost by district, 1990–2019.", out.width = "85%"}
-include_graphics(fig("fig08_district_ranking"))
-```
-
-Queenstown-Lakes, Wellington City, Thames-Coromandel, Lower Hutt, Porirua and Auckland were the dearest districts relative
-to the rest of the country; Ōpōtiki, South Waikato, Selwyn, Horowhenua, Tararua and Ashburton the cheapest.
-
-## Candidate drivers
-
-```{r cor-table}
-tab("t06_feature_correlations") |>
-  rename(Feature = feature) |>
-  kable(digits = 2, caption = "Correlation of each candidate predictor with the two responses (training rows)")
-```
-
-```{r fig-feat, fig.cap = "Relative cost against each candidate predictor, 1996–2019."}
-include_graphics(fig("fig11_features_vs_relative_cost"))
-```
-
-Measures of building activity (alterations, number of new houses, dwellings per 1,000 residents, non-residential
-work) and the share of multi-unit dwellings have the strongest, though modest, positive relationships with relative
-cost. No single predictor has a correlation above 0.4.
-
-```{r fig-conf, fig.cap = "House size and cost: raw (A) and compared within the same quarter (B)."}
-include_graphics(fig("fig10_house_size_confounding"))
-```
-
-House size illustrates confounding. Across all years, larger houses appear dearer per m², but only because houses
-and real costs both grew over time. Within the same quarter the relationship almost vanishes.
-
-```{r fig-heat, fig.cap = "Correlations between candidate predictors."}
-include_graphics(fig("fig12_feature_correlation_heatmap"))
-```
-
-The activity measures are strongly correlated with each other (variance inflation factors up to about 6), so linear
-regression coefficients for them must be interpreted with care. Lasso and random-forest importance are better
-guides to which matter.
-
-## Train versus test
-
-```{r fig-shift, fig.cap = "Distribution of each response in the training and test periods."}
-include_graphics(fig("fig13_train_test_shift"))
-```
-
-```{r fig-persist, fig.cap = "Mean relative cost by district, training vs test period."}
-include_graphics(fig("fig14_district_persistence"))
-```
-
-Real costs in 2020–2026 were about 17% higher than in the training years, a level that tree-based models cannot
-predict because they only average training values. Relative costs barely shifted, and districts largely kept their
-ranking (correlation 0.73).
-
-## Decisions for modelling
-
-* Main response: relative cost; secondary: log real $/m² with a time trend.
-* Training window 1996–2019, so that all predictors are available without imputation.
-* Island and season dropped; lagged costs excluded from the main (explanatory) models.
-
-# RQ1: Models and results
-
-```{r rq1-model-data}
-cv   <- tab("t08_cv_results")
-tst  <- tab("t09_test_results")
-imp  <- tab("t10_variable_importance")
-real <- tab("t11_real_response_results")
-cvv <- function(m, s, col = "cv_rmse")   cv[[col]][cv$model == m & cv$set == s]
-tv  <- function(m, s, col = "test_rmse") tst[[col]][tst$model == m & tst$set == s]
-r3 <- function(x) sprintf("%.3f", x)
-pc <- function(x) paste0(round(100 * x, 1), "%")
-```
-
-## Approach
-
-The main response is relative cost: the log of a district's real $/m² minus the log of the real $/m² of all other
-districts in the same quarter. Models were trained on 1996–2019 (`r f0(sum(model$split == "train" & model$year >= 1996) - 2)`
-district-quarters, after dropping Chatham Islands and Kawerau, which have only 1–2 usable rows). They were tested
-once on 2020Q1–2026Q2.
-
-We fitted eleven models in order of increasing flexibility:
-
-* two baselines (the overall mean, and each district's own training mean);
-* linear regression;
-* polynomial regression;
-* ridge, elastic net and lasso;
-* a generalised additive model (GAM);
-* a regression tree;
-* a random forest;
-* gradient-boosted trees (XGBoost);
-* a support vector machine with a radial kernel.
-
-Each model was fitted with two feature sets:
-
-* **drivers**: nine measured features plus region and a city flag;
-* **drivers + district**: the same nine features plus the district itself.
-
-The drivers are:
-
-* alteration spending;
-* new houses;
-* new dwellings per 1,000 residents;
-* growth in house numbers;
-* non-residential building;
-* the shares of multi-unit, apartment and retirement dwellings;
-* relative house size.
-
-Every model's hyperparameters were tuned by **forward-chaining cross-validation** on the training years. There were
-four folds, each training on all years before a two-year validation block (2012–13, 2014–15, 2016–17, 2018–19), so
-no model ever saw the future. Models were compared on mean CV RMSE (log scale, ≈ proportional error). Among models
-within one standard error of the best, the simplest was chosen.
 
 ```{r fig-folds, fig.cap = "Forward-chaining cross-validation folds within the training years."}
-include_graphics(fig("fig15_cv_folds"))
+include_graphics(fig_path("rq1", "fig15_cv_folds"))
 ```
 
-## Cross-validation results
-
-```{r cv-res-table}
-cv |> mutate(set = recode(set, none = "-", drivers = "Drivers", district = "Drivers + district")) |>
-  select(Set = set, Model = model, `Best settings` = best_settings, `CV RMSE` = cv_rmse, SE = cv_rmse_se,
-         `CV R²` = cv_r2) |>
-  kable(digits = 3, caption = "Cross-validated error of each model at its tuned settings (1996–2019).")
+```{r tab-rq1-full}
+cv1 |>
+  left_join(test1 |> select(model, set, test_rmse, test_r2, test_mape), by = c("model", "set")) |>
+  mutate(set = recode(set, none = "baseline", drivers = "drivers", district = "drivers + district"),
+         test_mape = 100 * test_mape) |>
+  select(Model = model, Set = set, `Best settings` = best_settings, `CV RMSE` = cv_rmse, SE = cv_rmse_se,
+         `CV R²` = cv_r2, `Test RMSE` = test_rmse, `Test MAPE (%)` = test_mape) |>
+  kable(digits = 3, caption = "All RQ1 models: tuned settings, cross-validated and test performance.")
 ```
 
-```{r fig-cv, fig.cap = "Cross-validated RMSE (±1 SE) of every model. Dashed line: district-mean baseline."}
-include_graphics(fig("fig19_cv_comparison"))
+```{r fig-tree1, fig.cap = "Regression tree on the drivers set, pruned for display. Red = dearer than the rest of New Zealand."}
+include_graphics(fig_path("rq1", "fig17_regression_tree"))
 ```
 
-**Drivers only:**
-
-* The flexible models (random forest, XGBoost, SVM) do best, with CV R² ≈
-  `r round(cvv("SVM (radial)", "drivers", "cv_r2"), 2)` versus ≈ `r round(cvv("Lasso", "drivers", "cv_r2"), 2)` for the
-  linear family. So the drivers act non-linearly and interact.
-* Even so, none clearly beats simply predicting each district's own average (CV RMSE
-  `r r3(cvv("District mean", "none"))`).
-
-**Drivers + district:**
-
-* Penalised linear models are best (lasso CV RMSE `r r3(cvv("Lasso", "district"))`, R²
-  `r round(cvv("Lasso", "district", "cv_r2"), 2)`), and they improve on the district mean.
-* Once each district has its own level, the remaining effects of the drivers are close to additive and linear.
-
-The one-standard-error rule selected a random forest (drivers set) and ridge regression (district set).
-
-```{r fig-tree, fig.cap = "Regression tree on the drivers set (pruned for display). Red = dearer than the rest of NZ."}
-include_graphics(fig("fig17_regression_tree"))
+```{r fig-cvtest, fig.cap = "Cross-validated and test RMSE of every RQ1 model."}
+include_graphics(fig_path("rq1", "fig20_cv_vs_test"))
 ```
 
-## Test-set performance (2020–2026)
-
-```{r test-res-table}
-tst |> mutate(set = recode(set, none = "-", drivers = "Drivers", district = "Drivers + district")) |>
-  select(Set = set, Model = model, `Test RMSE` = test_rmse, `Test MAE` = test_mae, `Test R²` = test_r2,
-         `MAPE ($/m²)` = test_mape) |>
-  kable(digits = 3, caption = "Test-period performance, 2020Q1–2026Q2. MAPE is on real $/m².")
+```{r fig-interaction, fig.cap = "Random forest: two-way partial dependence of relative cost on alteration spending and growth."}
+include_graphics(fig_path("rq1", "fig25_interaction_alterations_growth"))
 ```
-
-```{r fig-cvtest, fig.cap = "CV and test RMSE for each model. Dashed line: district-mean baseline on the test years."}
-include_graphics(fig("fig20_cv_vs_test"))
-```
-
-All models, including the overall mean (`r r3(tv("Overall mean", "none"))` vs `r r3(cvv("Overall mean", "none"))` in CV),
-have larger errors in 2020–26. Relative costs were more dispersed during the COVID period and the 2021–22 boom.
-
-* The district set again beats the drivers set: best test R² ≈
-  `r round(max(tst$test_r2[tst$set == "district"]), 2)` vs `r round(max(tst$test_r2[tst$set == "drivers"]), 2)`.
-* The district-mean baseline remains hard to beat (MAPE `r pc(tv("District mean", "none", "test_mape"))`).
-* The chosen ridge model predicts real $/m² with a mean absolute error of
-  `r pc(tv("Ridge", "district", "test_mape"))`.
-
-```{r fig-pva, fig.cap = "Predicted vs actual relative cost on the test years for the two chosen models."}
-include_graphics(fig("fig21_test_pred_vs_actual"))
-```
-
-## What drives relative cost?
-
-```{r fig-imp, fig.cap = "Variable importance from three models (drivers set). Colour shows the direction of the lasso coefficient."}
-include_graphics(fig("fig22_variable_importance"))
-```
-
-Lasso coefficients, random-forest permutation importance and XGBoost gain agree on the main drivers:
-
-* **Residential alteration spending** (positive) is the top driver: wealthier, busier markets build dearer houses.
-* **Region:** broad location still matters.
-* **New dwellings per 1,000 residents** (positive): fast-growing districts are dearer.
-* **The number of new houses** (negative, holding the others fixed): high-volume, greenfield districts such as
-  Selwyn are cheaper per m².
-* **Relative house size** (negative): fixed costs are spread over more floor area.
-
-The dwelling-mix shares contribute little. These are associations, not causal effects.
-
-## Modelling real $/m² directly
 
 ```{r fig-real, fig.cap = "National geometric-mean real $/m² (black) and test-period predictions of models fitted to log real $/m² with a time trend."}
-include_graphics(fig("fig23_real_cost_extrapolation"))
+include_graphics(fig_path("rq1", "fig23_real_cost_extrapolation"))
 ```
 
-When the target is the real cost itself (with a time trend), each model family breaks down in its own way after
-2019:
+# Appendix C: Additional RQ2 results {- #app-rq2}
 
-* the district mean under-predicts by about `r pc(-real$mean_bias[real$model == "District mean"])`;
-* trees and forests flatten at the last level they saw;
-* linear models extend the 1996–2019 trend and overshoot.
-
-Modelling relative cost avoids having to forecast the national price level, which is why it is our main response.
-
-# RQ1: Interpretation and answer
-
-```{r rq1-interp-data}
-eff <- tab("t12_effect_sizes")
-wb  <- tab("t13_within_between")
-bd  <- tab("t14_test_error_by_district")
-ef  <- function(f, m) sprintf("%+.1f%%", eff[[m]][eff$feature == f])
+```{r fig-rq2-corr, fig.cap = "Correlation between district features after transformation."}
+include_graphics(fig_path("rq2", "fig02_feature_correlation"))
 ```
 
-## How each driver changes the prediction
-
-```{r fig-pdp, fig.cap = "Partial dependence of predicted relative cost on six drivers, for the chosen random forest (drivers set), ridge on the same features, and the chosen ridge model with district. x-axis: percentile of the feature."}
-include_graphics(fig("fig24_partial_dependence"))
+```{r fig-silhouette, fig.cap = "Silhouette width of each district. Negative values: closer, on average, to another cluster."}
+include_graphics(fig_path("rq2", "fig08_silhouette"))
 ```
 
-A partial dependence curve shows how a model's average prediction changes as one feature moves while the others
-keep their observed values. From the 10th to the 90th percentile of each feature:
-
-* **Residential alteration spending** raises predicted relative cost by `r ef("log_resid_alt_real", "Random forest, drivers")`
-  (random forest) to `r ef("log_resid_alt_real", "Ridge, drivers")` (ridge). All models agree and the curve is close to
-  straight.
-* **New dwellings per 1,000 residents** adds `r ef("dwell_per_1000", "Random forest, drivers")` in the forest, with a
-  further jump of about 4% in the fastest-growing tenth of district-quarters.
-* **House size, non-residential work and growth in house numbers** each move the prediction by 2% or less.
-
-```{r fig-interaction, fig.cap = "Two-way partial dependence (random forest): alteration spending and growth together."}
-include_graphics(fig("fig25_interaction_alterations_growth"))
+```{r tab-rq2-members}
+tab_of("rq2", "t05_cluster_members") |>
+  rename(Market = market, Districts = districts, Members = members) |>
+  kable(caption = "Members of each cluster.")
 ```
 
-The two leading drivers interact. Growth adds little where alteration spending is low, but up to about +14% where
-spending is high. This is something additive models cannot represent, and it helps explain why the forest beat the
-linear models on the drivers set.
+# Appendix D: Additional RQ3 results {- #app-rq3}
 
-## Between districts versus within a district
-
-```{r within-between-table}
-wb |> kable(digits = 3, col.names = c("Feature", "Drivers set (between + within)", "District set (within only)", "Sign flips"),
-            caption = "Ridge regression, standardised coefficients (log points per 1 SD).")
+```{r fig-rq3-features, fig.cap = "Each RQ3 feature for district-years that fell or rose the following year (training rows)."}
+include_graphics(fig_path("rq3", "fig02_features_by_outcome"))
 ```
 
-Adding the district to a model changes what the other coefficients mean. Without it, they mix comparisons between
-districts with changes within a district over time. With it, only the within-district comparison remains.
-
-* **Number of new houses** flips sign. For the same alteration spending and growth, districts that build many
-  houses are cheaper per m² (volume builders, large subdivisions such as Selwyn), but a district is dearer in its
-  own busier quarters (more demand for the same builders).
-* **Dwellings per 1,000 residents** almost vanishes within districts. Fast-growing places are dearer, but a place is
-  not much dearer in its own fast-growth years.
-* **Alteration spending** keeps its sign and size, so it holds both between and within districts.
-
-## Location premium left after the drivers
-
-```{r fig-premium, fig.cap = "District premium before (raw average) and after accounting for the measured drivers (ridge, district set, 1996–2019)."}
-include_graphics(fig("fig26_district_premium"))
+```{r fig-rq3-tree, fig.cap = "Classification tree (pruned for display): fall (0) or rise (1) next year."}
+include_graphics(fig_path("rq3", "fig07_tree"))
 ```
 
-The drivers explain only about a fifth of the variance between district averages. Queenstown-Lakes remains the
-dearest district after its drivers (about +15% above the average district). Wellington City and Thames-Coromandel
-lose about half their premium. Auckland and Christchurch move from dearer than average to cheaper than their drivers
-predict, because they have the largest total alteration and non-residential spending in the country. This shows
-that our activity features, which are total dollars, partly measure district size.
+# Appendix E: Reproducibility {- #app-repro}
 
-## Where the test predictions go wrong
+All analysis is in R Markdown notebooks, one folder per research question, using shared helper functions in `R/`.
+Each notebook's knitted HTML shows its code, results and the helper code in an appendix.
 
-```{r fig-error-year, fig.cap = "Test RMSE by year for the chosen models and the district-mean baseline, with the spread of actual relative costs (dashed)."}
-include_graphics(fig("fig27_test_error_by_year"))
-```
+| Folder / file | Contents |
+|---|---|
+| `analysis/rq1_cost_per_m2/01–04` | data preparation, exploratory analysis, models, interpretation |
+| `analysis/rq2_clustering/01–02` | district features; clustering |
+| `analysis/rq3_rise_fall/01–02` | district-year table; classifiers |
+| `R/` | helpers for reading data, model tuning, clustering and classification |
+| `data/processed/` | model-ready tables (the raw data are downloaded from Stats NZ) |
+| `outputs/` | figures, tables and saved models used by this report and the app |
+| `app/app.R` | the Shiny app |
+| `communication/` | poster (A2) and presentation slides, with the scripts that build them |
+| `docs/data_dictionary.md` | every column of every processed table |
 
-```{r fig-error-size, fig.cap = "Test RMSE by number of new houses in the district-quarter."}
-include_graphics(fig("fig28_test_error_by_size"))
-```
-
-* Errors were smallest in 2020–2022 and largest in 2024, when the spread between districts peaked. Ridge beat the
-  district-mean baseline in 2020–2023 but not in 2024–2026, so the relationships learned before 2020 drifted.
-* All models under-predict by about 2–4% on average. Smaller districts became dearer relative to the large
-  centres after 2020.
-* Errors are largest for district-quarters with few houses, where one unusual consent moves the $/m².
-* The largest errors in larger districts were in coastal and lifestyle areas (Kaipara, Thames-Coromandel, Western Bay
-  of Plenty, Queenstown-Lakes), which became dearer than predicted, and in Waimakariri, which became cheaper.
-
-A finer tuning grid for the random forest chose the same settings with no change in CV error, so these errors are
-not a tuning problem.
-
-## Answer to RQ1
-
-**What drives the real cost per m² of new houses across districts?** Location matters most. The measured drivers
-explain a modest part of it:
-
-| Driver | Direction | Size (10th to 90th percentile) |
-|---|---|---|
-| Residential alteration spending | dearer | about +8% to +11% |
-| Region | varies | up to about ±10% |
-| Dwellings per 1,000 residents | dearer | about +3% to +6%, more in the fastest-growing places |
-| Number of new houses | cheaper between districts (for the same alteration spending), dearer within | about ±5% |
-| Relative house size | slightly cheaper | about −1% to −2% |
-| Dwelling mix | none detected | under 1% |
-
-With drivers and region only, the best models explain about a third of the variation in relative cost, about as
-much as the district name alone. With the district added, ridge regression predicts 2020–2026 within about 8%
-(MAPE), marginally better than each district's historical average. Most of the difference between districts lies in
-features we do not observe: land, terrain, local labour markets and the type of house built.
-
-# RQ2: Building-market clusters
-
-*Placeholder.*
-
-# RQ3: Rising or falling consents
-
-*Placeholder.*
-
-# Discussion and limitations
-
-**RQ1.**
-
-* Consented value is the builder's estimate at consent time, not the final build cost, and it excludes land.
-* The activity features are total dollars, so they partly measure district size. Per-resident versions would be
-  cleaner, but population estimates are not in this release.
-* We do not observe land prices, house specification or builder type, the most likely sources of the unexplained
-  location premium.
-* The results are associations in observational data, not causal effects.
-* Auckland is treated as one district, and districts with fewer than five new houses in a quarter are left out, so
-  the smallest districts are under-represented.
-* Relationships drifted after 2023, so a model used for current decisions would need regular retraining.
-
-*RQ2 and RQ3 points to be added.*
-
-# References
-
-* Stats NZ (2026). *Building consents issued: August 2026*. Licensed under CC BY 4.0.
-* Stats NZ (2026). *Business price indexes: June 2026 quarter*. Licensed under CC BY 4.0.
+Software: `r R.version.string`; random seed 462 throughout.

@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>What New Zealand builds: poster</title>
+<!-- Version 2: styled to match the group's pitch deck (extra/whileTrue_learn_Pitch.pptx).
+     Version 1 is kept in communication/earlier_versions/v1_slate_theme/. -->
+<style>
+  @font-face { font-family: "Open Sauce One"; src: url("../assets/fonts/OpenSauceOne-Regular.ttf"); font-weight: 400; }
+  @font-face { font-family: "Open Sauce One"; src: url("../assets/fonts/OpenSauceOne-Italic.ttf"); font-weight: 400; font-style: italic; }
+  @font-face { font-family: "Open Sauce One"; src: url("../assets/fonts/OpenSauceOne-SemiBold.ttf"); font-weight: 600; }
+  @font-face { font-family: "Open Sauce One"; src: url("../assets/fonts/OpenSauceOne-Bold.ttf"); font-weight: 700; }
+  @font-face { font-family: "Open Sauce One"; src: url("../assets/fonts/OpenSauceOne-ExtraBold.ttf"); font-weight: 800; }
+  @page { size: 420mm 594mm; margin: 0; }
+  :root {
+    --ink: #2B2B2B; --muted: #5C5148; --orange: #FBAC4D; --dark: #C76B0A; --brown: #9A5200;
+    --border: #EDB46E; --tint: #FFF8EF; --card: rgba(255, 255, 255, 0.55);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body { width: 420mm; height: 594mm; font-family: "Open Sauce One", Arial, sans-serif; color: var(--ink);
+         font-size: 11.5pt; line-height: 1.28;
+         background: url("../assets/pitch_background.png") top left / 100% 100% no-repeat, #FDEBD3; }
+  .poster { position: relative; width: 420mm; height: 594mm; padding: 10mm 12mm 9mm; display: flex; flex-direction: column; gap: 5mm; overflow: hidden; }
+
+  /* header, after the pitch deck's title slide */
+  .topline { display: flex; justify-content: space-between; align-items: center; font-size: 12pt; }
+  .topline .tag { display: flex; align-items: center; gap: 2.5mm; }
+  .dot { width: 4mm; height: 4mm; border-radius: 50%; background: var(--orange); display: inline-block; }
+  header { position: relative; padding: 2mm 0 1mm; }
+  header h1 { margin: 0; font-size: 42pt; font-weight: 800; line-height: 1.02; letter-spacing: -0.5pt; max-width: 300mm; }
+  header .sub { margin-top: 2mm; font-size: 16pt; color: var(--muted); }
+  header .circle { position: absolute; right: 12mm; top: 0mm; width: 40mm; height: 40mm; border-radius: 50%; background: var(--orange); }
+  header .who { margin-top: 2.5mm; display: flex; align-items: center; gap: 3mm; font-size: 14pt; }
+  header .who .rings { position: relative; width: 16mm; height: 10mm; }
+  header .who .rings span { position: absolute; top: 0; width: 10mm; height: 10mm; border-radius: 50%; }
+  header .who .rings span:first-child { left: 0; background: var(--orange); }
+  header .who .rings span:last-child { left: 6mm; border: 1.2pt solid var(--orange); }
+  header .who b { font-size: 15pt; }
+
+  h2 { margin: 0 0 2mm; font-size: 19pt; font-weight: 700; display: flex; align-items: center; gap: 2.5mm; }
+  h2::before { content: ""; width: 5mm; height: 5mm; border-radius: 50%; background: var(--orange); flex: none; }
+  h3 { margin: 0 0 1.5mm; font-size: 14pt; }
+  p { margin: 0 0 2mm; }
+  ul { margin: 0 0 2mm; padding-left: 5mm; }
+  li { margin-bottom: 1.1mm; }
+  img { display: block; width: 100%; height: auto; }
+  .muted { color: var(--muted); }
+
+  .card { background: var(--card); border: 1pt solid var(--border); border-radius: 4mm; padding: 4.5mm 5.5mm; }
+  .row3 { display: grid; grid-template-columns: 1.15fr 1fr 1.1fr; gap: 5mm; }
+  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 3mm; margin: 1mm 0 3mm; }
+  .tile { background: var(--tint); border: 1pt solid var(--border); border-radius: 3mm; padding: 2.2mm 3mm; }
+  .tile .n { font-size: 20pt; font-weight: 800; color: var(--dark); line-height: 1.05; }
+  .tile .l { font-size: 10pt; color: var(--muted); }
+  table.methods { width: 100%; border-collapse: collapse; font-size: 10.5pt; }
+  table.methods th { background: var(--orange); text-align: left; padding: 1.6mm 2mm; font-weight: 700; }
+  table.methods td { padding: 1.6mm 2mm; border-top: 1pt solid var(--border); vertical-align: top; }
+
+  .band { display: grid; grid-template-columns: 118mm 1fr 1fr; grid-template-rows: auto auto; column-gap: 5mm; row-gap: 3mm; }
+  .band .text { grid-row: 1 / 3; font-size: 11pt; }
+  .band .text li { margin-bottom: 0.5mm; }
+  .chip { display: inline-block; font-weight: 700; font-size: 11pt; padding: 1mm 3.2mm; border-radius: 10mm; margin-bottom: 2mm; }
+  .rq1 .chip { background: var(--dark); color: #fff; } .rq2 .chip { background: var(--orange); color: var(--ink); }
+  .rq3 .chip { background: var(--brown); color: #fff; }
+  .q { font-size: 14.5pt; font-weight: 700; margin-bottom: 2mm; line-height: 1.2; }
+  .hyp { font-style: italic; color: var(--muted); margin-bottom: 2.5mm; }
+  .fig { background: var(--card); border: 1pt solid var(--border); border-radius: 3mm; padding: 2.5mm; }
+  .fig figcaption { font-size: 10pt; color: var(--muted); margin-top: 1.2mm; }
+  .answer { grid-column: 2 / 4; background: var(--tint); border: 1pt solid var(--border); border-radius: 3mm;
+            padding: 2.5mm 3.5mm; font-weight: 700; font-size: 13pt; }
+  .answer b { color: var(--dark); }
+
+  .bottom { display: grid; grid-template-columns: 1.25fr 1fr 1fr; gap: 5mm; font-size: 11pt; }
+  .bottom li { margin-bottom: 0.8mm; }
+  .concl { background: var(--orange); border-radius: 4mm; padding: 4.5mm 5.5mm; }
+  .concl h2::before { background: #fff; }
+  .concl li { margin-bottom: 1mm; }
+  .refs { font-size: 9pt; line-height: 1.25; }
+  .refs p { margin-bottom: 1.2mm; }
+</style>
+</head>
+<body>
+<div class="poster">
+
+  <div class="topline">
+    <span class="tag"><span class="dot"></span>while True: learn()&nbsp;&nbsp;·&nbsp;&nbsp;GROUP 8</span>
+    <span>STAT462 Data Mining&nbsp;&nbsp;·&nbsp;&nbsp;University of Canterbury&nbsp;&nbsp;·&nbsp;&nbsp;November 2026</span>
+  </div>
+
+  <header>
+    <div class="circle"></div>
+    <h1>What New Zealand builds,<br>where, and at what cost</h1>
+    <div class="sub">Machine learning on 36 years of Stats NZ building consents</div>
+    <div class="who"><span class="rings"><span></span><span></span></span>
+      <b>Andrew Boulton&nbsp;&nbsp;·&nbsp;&nbsp;Harish Sahadev M&nbsp;&nbsp;·&nbsp;&nbsp;Niwesh Baraj</b></div>
+  </header>
+
+  <!-- Why and how -->
+  <section class="row3">
+    <div class="card">
+      <h2>Background</h2>
+      <p>Before anything is built, a council issues a building consent. Stats NZ records the number, value and floor
+         area of every consent, by district and month, since 1990: <b>what</b> New Zealand builds, <b>where</b>, and
+         <b>at what cost</b>.</p>
+      <div class="fig"><img src="../../outputs/figures/communication/c01_cost_by_district_2025.png" alt="Cost per square metre by district">
+        <figcaption>Queenstown costs 1.7× as much per square metre as Selwyn. RQ1 asks why.</figcaption></div>
+    </div>
+    <div class="card">
+      <h2>Data</h2>
+      <div class="tiles">
+        <div class="tile"><div class="n">10.4M</div><div class="l">rows across 13 Stats NZ tables (Aug 2026 release)</div></div>
+        <div class="tile"><div class="n">67</div><div class="l">districts, monthly from April 1990</div></div>
+        <div class="tile"><div class="n">9,715</div><div class="l">district-quarters after aggregation</div></div>
+        <div class="tile"><div class="n">×4.7 → +20%</div><div class="l">rise in cost per square metre, 1991–2025: nominal vs real</div></div>
+      </div>
+      <h3>Preparation</h3>
+      <ul>
+        <li>Reshaped to one row per district and quarter (RQ1) or year (RQ3)</li>
+        <li>2010 GST change removed; deflated to June-2026 dollars (Capital Goods Price Index)</li>
+        <li>Quarters with under 5 new houses not modelled; no feature uses house value</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h2>Approach</h2>
+      <p>Three questions, one per family of methods. Models are trained on earlier years and tested once on the most
+         recent years they never saw. Settings are tuned by time-ordered cross-validation, and the simplest model within
+         one standard error of the best is chosen.</p>
+      <table class="methods">
+        <tr><th>Question</th><th>Methods compared</th><th>Chosen</th></tr>
+        <tr><td><b>RQ1</b> regression<br><span class="muted">district × quarter</span></td>
+            <td>baselines, linear, polynomial, ridge, lasso, elastic net, GAM, <b>regression tree</b>, <b>random forest</b>, XGBoost, SVM</td>
+            <td>ridge (with district); random forest (without)</td></tr>
+        <tr><td><b>RQ2</b> clustering<br><span class="muted">66 districts</span></td>
+            <td><b>k-means</b> and <b>hierarchical</b> (4 linkages); k chosen by 5 criteria</td>
+            <td>k-means, k = 3</td></tr>
+        <tr><td><b>RQ3</b> classification<br><span class="muted">district × year</span></td>
+            <td>baselines, logistic, lasso, <b>LDA</b>, <b>QDA</b>, <b>classification tree</b>, KNN, random forest</td>
+            <td>logistic regression</td></tr>
+      </table>
+    </div>
+  </section>
+
+  <!-- RQ1 -->
+  <section class="band rq1">
+    <div class="text card">
+      <span class="chip">RQ1 · Regression</span>
+      <div class="q">What drives the real cost per square metre of new houses across districts?</div>
+      <div class="hyp">Hypothesis: busier, denser markets cost more per square metre.</div>
+      <p>Response: each district's cost <b>relative to the rest of NZ</b> in the same quarter, which removes the national price level. 11 models; train 1996–2019, test 2020–2026.</p>
+      <ul>
+        <li><b>Renovation spending</b>: strongest driver (+8% to +11%), a sign of wealthy, busy markets</li>
+        <li><b>Fast growth</b> adds cost, mostly in the fastest-growing places</li>
+        <li><b>More new houses</b>: cheaper across districts (volume builders), dearer in a district's own busy years</li>
+      </ul>
+    </div>
+    <div class="fig"><img src="../../outputs/figures/communication/c04_rq1_drivers.png" alt="Drivers of cost"></div>
+    <div class="fig"><img src="../../outputs/figures/communication/c03_rq1_accuracy.png" alt="Prediction error"></div>
+    <div class="answer"><b>Answer:</b> location matters most. The measured drivers explain about a fifth of the gap between districts; Queenstown is still about 15% dearer after them.</div>
+  </section>
+
+  <!-- RQ2 -->
+  <section class="band rq2">
+    <div class="text card">
+      <span class="chip">RQ2 · Clustering</span>
+      <div class="q">What kinds of building markets does New Zealand have?</div>
+      <div class="hyp">Hypothesis: districts form a few distinct market types.</div>
+      <p>66 districts, nine features (2016–2026): dwelling mix, homes per resident, growth, volatility, cost, house size, commercial share.</p>
+      <ul>
+        <li><b>House-building</b> (30): commuter belts, lifestyle and retirement areas</li>
+        <li><b>Slow provincial</b> (21): little, volatile building; cheapest</li>
+        <li><b>Urban medium-density</b> (15): cities and Queenstown; dearest</li>
+      </ul>
+    </div>
+    <div class="fig"><img src="../../outputs/figures/communication/c05_rq2_markets.png" alt="Three markets">
+      <figcaption>Axes: first two principal components of the nine features.</figcaption></div>
+    <div class="fig"><img src="../../outputs/figures/communication/c06_rq2_profiles.png" alt="Market profiles">
+      <figcaption>Four of the nine clustering features.</figcaption></div>
+    <div class="answer"><b>Answer:</b> three markets. k-means and Ward's clustering agree on 60 of 66 districts and the grouping is stable (0.85), but separation is weak (silhouette 0.21): a useful summary of a continuum.</div>
+  </section>
+
+  <!-- RQ3 -->
+  <section class="band rq3">
+    <div class="text card">
+      <span class="chip">RQ3 · Classification</span>
+      <div class="q">Will a district's consents rise or fall next year?</div>
+      <div class="hyp">Hypothesis: recent momentum predicts next year's direction.</div>
+      <p>1,914 district-years; 11 features known at year end, including national momentum. Train 1996–2016, test 2017–2024, tuned on AUC.</p>
+      <ul>
+        <li>Rises more likely when <b>NZ builds above its 5-year average</b> and ends the year strongly</li>
+        <li>Lumpy apartment markets and districts above their own average tend to <b>fall back</b></li>
+        <li>LDA matches logistic regression; trees, KNN and forests add nothing</li>
+      </ul>
+    </div>
+    <div class="fig"><img src="../../outputs/figures/communication/c07_rq3_together.png" alt="Districts move together"></div>
+    <div class="fig"><img src="../../outputs/figures/communication/c08_rq3_accuracy.png" alt="Prediction accuracy"></div>
+    <div class="answer"><b>Answer:</b> only modestly predictable: 58% correct (AUC 0.63) vs 53% for the best simple rule. Districts follow the national cycle, whose turning points these data cannot see.</div>
+  </section>
+
+  <!-- Conclusions -->
+  <section class="bottom">
+    <div class="concl">
+      <h2>Conclusions</h2>
+      <ul>
+        <li><b>Place and the national cycle dominate:</b> measured features explain a modest part of cost
+            differences, market types blur together, and next year's direction is hard to call.</li>
+        <li><b>Hypotheses:</b> H1 supported; H2 partly (three types, weakly separated); H3 weakly (national
+            momentum helps, district momentum reverses).</li>
+        <li><b>Simple models were enough:</b> ridge and logistic regression matched XGBoost, SVM and forests on
+            unseen years.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h2>Limitations &amp; future work</h2>
+      <ul>
+        <li>Consented value is an estimate at consent time and excludes land</li>
+        <li>Activity measures are totals, so partly measure size; per-resident versions need population data</li>
+        <li>No land prices, interest rates or migration: the most promising additions</li>
+        <li>Associations, not causes; relationships drifted after 2023</li>
+      </ul>
+    </div>
+    <div class="card refs">
+      <h2>References</h2>
+      <p>Stats NZ. (2026). <i>Building consents issued: August 2026</i> [Data set]. CC BY 4.0. https://www.stats.govt.nz/information-releases/building-consents-issued-august-2026</p>
+      <p>Stats NZ. (2026). <i>Business price indexes: June 2026 quarter</i> [Data set]. CC BY 4.0.</p>
+      <p>James, G., Witten, D., Hastie, T., &amp; Tibshirani, R. (2021). <i>An introduction to statistical learning</i> (2nd ed.). Springer.</p>
+      <p class="muted">Full references in the report.</p>
+      <p class="muted"><b>AI use:</b> Claude (Anthropic) helped write and debug R code and edit text; all analysis
+         choices and results were reviewed by the group.</p>
+    </div>
+  </section>
+
+</div>
+</body>
+</html>

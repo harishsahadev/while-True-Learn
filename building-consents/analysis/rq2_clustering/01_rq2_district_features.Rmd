@@ -1,0 +1,407 @@
+---
+title: "RQ2 Step 1: A profile of each district's building market"
+subtitle: "What kinds of building markets does New Zealand have?"
+author: "while True: learn(), Group 8, STAT462"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: show
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE,
+                      fig.align = "center", out.width = "85%")
+find_proj_root <- function(path = getwd()) {
+  path <- normalizePath(path)
+  repeat {
+    if (length(list.files(path, pattern = "\\.Rproj$"))) return(path)
+    parent <- dirname(path)
+    if (parent == path) stop("No .Rproj file found above ", getwd())
+    path <- parent
+  }
+}
+proj_root <- find_proj_root()
+knitr::opts_knit$set(root.dir = proj_root)
+```
+
+```{r load}
+source(file.path(proj_root, "R", "utils_data.R"))
+source(file.path(proj_root, "R", "utils_cluster.R"))
+library(knitr)
+
+# ---- Settings for this notebook -------------------------------------------
+WINDOW_FROM <- c(2016L, 3L)   # profile window: the last ten years, 2016Q3 to 2026Q2
+SPLIT_AT    <- c(2021L, 3L)   # growth = second five years vs first five years
+VOL_YEARS   <- 2006:2025      # volatility: twenty complete years (covers 2008-11 and the 2021 boom)
+
+full <- read_csv(file.path(paths$processed, "rq1_district_quarter_full.csv"), show_col_types = FALSE)
+dim(full)
+```
+
+# Purpose
+
+**Research question 2:** *What kinds of building markets does New Zealand have?*
+
+RQ1 modelled one row per district and quarter. RQ2 is **unsupervised**: there is no response to predict. We
+describe each district by a handful of features and let a clustering method group districts that look alike. The
+pitch named four themes: **type mix, growth, volatility and cost**.
+
+This notebook builds one row per district, checks the features, decides how to transform them, and checks how much
+they overlap. The clustering itself is in Step 2.
+
+The input is the district-quarter table from RQ1 Step 1 (`rq1_district_quarter_full.csv`). It holds all 67
+districts and every quarter from 1990Q2 to 2026Q2, so no raw data is needed.
+
+# Unit and time window
+
+**One row per district.** Clustering 9,715 district-quarters would group *quarters*, mixing the same district
+across different times. RQ2 asks about *markets*, so each district gets one profile.
+
+**Window: the last ten years, 2016Q3 to 2026Q2.** Ten years is long enough to smooth out the noise of small
+districts, and recent enough to describe today's markets rather than those of the 1990s. Two features need a
+different period:
+
+* **growth** compares the second five years with the first five years of the window;
+* **volatility** uses twenty complete years (2006–2025), so that every district has been through a full cycle: the
+  2008–2011 downturn and the 2021 boom.
+
+```{r window}
+from_index  <- yq_index(WINDOW_FROM[1], WINDOW_FROM[2])
+split_index <- yq_index(SPLIT_AT[1], SPLIT_AT[2])
+win <- full |> filter(t_index >= from_index)
+c(first = min(win$yq), last = max(win$yq), quarters = n_distinct(win$yq))
+
+win |> group_by(ta) |> summarise(new_dwellings = sum(dwell_n), new_houses = sum(houses_n)) |>
+  arrange(new_dwellings) |> head(5) |> kable(caption = "Smallest districts over the window")
+```
+
+**Decision.** The Chatham Islands consented only 34 new dwellings in ten years. Shares and growth rates from so
+few dwellings are mostly noise, and its building market (an island 800 km offshore) is unlike any other. We leave it
+out, which gives **66 districts**. Kawerau (92 dwellings) is small but kept; we keep an eye on it.
+
+```{r drop-chatham}
+win  <- win  |> filter(ta != "Chatham Islands Territory")
+full <- full |> filter(ta != "Chatham Islands Territory")
+```
+
+# The features
+
+Each feature answers a question about a district's market. All money is in real June-2026 dollars, as in RQ1.
+
+| Theme | Feature | Definition (over the window) | Question it answers |
+|---|---|---|---|
+| Type mix | `apt_share` | apartments ÷ new dwellings | Is it an apartment market? |
+| | `retire_share` | retirement-village units ÷ new dwellings | Is it a retirement market? |
+| | `town_share` | townhouses, flats and units ÷ new dwellings | Is it a medium-density market? |
+| | `house_share` | stand-alone houses ÷ new dwellings | (the remainder; see the VIF section) |
+| Intensity | `dwell_per_1000` | average new dwellings per 1,000 residents per year | How fast is it building for its size? |
+| Growth | `growth` | log(new dwellings in the second five years ÷ first five years) | Is building speeding up or slowing down? |
+| Volatility | `volatility` | standard deviation of the yearly log change in new dwellings, 2006–2025 | Does it boom and bust? |
+| Cost | `rel_cost` | log(district real $/m² ÷ real $/m² of all other districts) | Is it dear or cheap to build in? |
+| House size | `house_m2` | floor area ÷ number of new houses | Does it build big houses? |
+| Economy | `nonres_share` | new non-residential value ÷ (new non-residential + new residential value) | Is building mostly homes, or also commercial? |
+| Renovation | `alt_share` | residential alterations ÷ (alterations + new residential) | Is it a mature market that renovates more than it builds? |
+
+**Size is left out on purpose.** The number of new dwellings would dominate any clustering (Auckland builds
+50 times more than most districts), and the result would be a ranking by size. We want districts of different sizes
+to fall in the same group if their markets *work* the same way. Intensity (`dwell_per_1000`) measures activity
+relative to population instead. Size is still used afterwards, to describe the clusters.
+
+Every share and ratio is computed from **totals over the window** (for example, total apartments ÷ total
+dwellings), not as an average of quarterly ratios, so quarters with few dwellings don't count as much as busy
+ones.
+
+```{r features}
+# national totals, used for the leave-one-out cost comparison
+nat <- win |> summarise(val = sum(houses_val * real_factor), m2 = sum(houses_m2))
+
+feat <- win |>
+  group_by(ta, region, island, is_city) |>
+  summarise(
+    dwellings      = sum(dwell_n),
+    houses         = sum(houses_n),
+    apt_share      = sum(apt_n) / sum(dwell_n),
+    retire_share   = sum(retire_n) / sum(dwell_n),
+    town_share     = sum(town_n) / sum(dwell_n),
+    house_share    = sum(houses_n) / sum(dwell_n),
+    dwell_per_1000 = mean(dwell_per_1000),
+    growth         = log((sum(dwell_n[t_index >= split_index]) + 1) / (sum(dwell_n[t_index < split_index]) + 1)),
+    rel_cost       = log(sum(houses_val * real_factor) / sum(houses_m2)) -
+                     log((nat$val - sum(houses_val * real_factor)) / (nat$m2 - sum(houses_m2))),
+    house_m2       = sum(houses_m2) / sum(houses_n),
+    nonres_share   = sum(nonres_new_val) / (sum(nonres_new_val) + sum(resid_new_val)),
+    alt_share      = sum(resid_alt_val) / (sum(resid_alt_val) + sum(resid_new_val)),
+    .groups = "drop")
+
+# volatility from yearly totals: quarterly counts in small districts are too noisy
+volatility <- full |>
+  filter(year %in% VOL_YEARS) |>
+  group_by(ta, year) |>
+  summarise(dwellings = sum(dwell_n), .groups = "drop") |>
+  group_by(ta) |>
+  summarise(volatility = sd(diff(log(dwellings + 1))), years = n())
+stopifnot(all(volatility$years == length(VOL_YEARS)))
+
+feat <- feat |> left_join(volatility |> select(ta, volatility), by = "ta")
+c(districts = nrow(feat), missing_values = sum(is.na(feat)))
+```
+
+**Observation.** 66 districts, no missing values. The `+ 1` in growth and volatility avoids log(0) when a district
+consents no dwellings in a year. It only matters for the smallest districts.
+
+# Checking the features
+
+```{r feature-summary}
+all_vars <- c("apt_share", "retire_share", "town_share", "house_share", "dwell_per_1000", "growth",
+              "volatility", "rel_cost", "house_m2", "nonres_share", "alt_share")
+
+feat_summary <- feat |>
+  select(all_of(all_vars)) |>
+  pivot_longer(everything(), names_to = "feature") |>
+  group_by(feature) |>
+  summarise(min = min(value), median = median(value), max = max(value),
+            skewness = mean((value - mean(value))^3) / sd(value)^3, .groups = "drop") |>
+  arrange(desc(abs(skewness)))
+feat_summary |> kable(digits = 3, caption = "Features before any transformation (66 districts)")
+
+# the extreme districts on the most skewed features
+bind_rows(feat |> slice_max(apt_share, n = 3) |> mutate(feature = "apt_share"),
+          feat |> slice_max(dwell_per_1000, n = 3) |> mutate(feature = "dwell_per_1000"),
+          feat |> slice_max(volatility, n = 3) |> mutate(feature = "volatility")) |>
+  select(feature, ta, apt_share, dwell_per_1000, volatility) |>
+  kable(digits = 3)
+```
+
+**Observation.** Several features are strongly **right-skewed** (skewness well above 1): a few districts have
+values far above the rest. Wellington City builds 39% apartments when the median district builds 0.5%. Queenstown
+and Selwyn build far more dwellings per resident than anywhere else. Kawerau's volatility is extreme because a few
+dwellings more or less make a large percentage change.
+
+This matters for clustering. Distance-based methods (k-means, hierarchical) measure how far apart districts are.
+One district far out on a single feature is then far from *everything*, and ends up in a cluster of its own. In a
+first trial without transformation, Wellington City formed a one-district cluster purely because of its apartment
+share. That says nothing about kinds of markets.
+
+## Transformations
+
+We transform the skewed features so that their extreme values are pulled in, while keeping the order of the
+districts:
+
+* **square root** for the shares (`apt_share`, `retire_share`, `town_share`, `nonres_share`). The square root works
+  for values of exactly 0, which a log does not, and it spreads out the small shares where most districts are;
+* **log** for `dwell_per_1000` and `volatility`, which are positive rates.
+
+`growth` and `rel_cost` are already logs of ratios, and `house_m2` is only mildly skewed with no extreme values,
+so they are left as they are.
+
+```{r transform, fig.height = 5}
+tf <- feat |>
+  mutate(across(c(apt_share, retire_share, town_share, nonres_share, house_share, alt_share), sqrt),
+         dwell_per_1000 = log(dwell_per_1000),
+         volatility     = log(volatility))
+
+skew <- function(x) mean((x - mean(x))^3) / sd(x)^3
+skew_compare <- tibble(feature = all_vars,
+                       before = map_dbl(all_vars, \(v) skew(feat[[v]])),
+                       after  = map_dbl(all_vars, \(v) skew(tf[[v]])))
+kable(skew_compare, digits = 2, caption = "Skewness before and after transforming")
+
+p_dist <- tf |>
+  select(all_of(all_vars)) |>
+  pivot_longer(everything(), names_to = "feature") |>
+  ggplot(aes(value)) +
+  geom_histogram(bins = 20, fill = "#2a6f97") +
+  facet_wrap(~feature, scales = "free", ncol = 4) +
+  labs(title = "District features after transformation", x = NULL, y = "Districts")
+save_fig(p_dist, "fig01_feature_distributions", dir = paths$fig_rq2, height = 5, width = 8)
+```
+
+**Observation.** Skewness falls to below about 1 for every transformed feature except `apt_share` (about 2). Most
+districts build almost no apartments, so a few city districts still stand out on it, but much less than before.
+
+## Standardising
+
+Features are on very different scales: `house_m2` runs from about 130 to 210, the shares from 0 to 1. In a
+Euclidean distance, a difference of 10 m² would count as much as a difference between 0% and 100% apartments. So
+every feature is **standardised** (z-score): subtract its mean and divide by its standard deviation. Each feature
+then has mean 0 and SD 1, and contributes equally to the distance. This is done in Step 2 with `scale()`.
+
+# Do the features overlap? (correlation and VIF)
+
+In clustering, two features that measure the same thing count that thing **twice** in the distance. So we check for
+overlap before clustering.
+
+## Correlation
+
+```{r correlation, fig.height = 5.5}
+cm <- cor(tf |> select(all_of(all_vars)))
+p_cor <- as_tibble(cm, rownames = "a") |>
+  pivot_longer(-a, names_to = "b", values_to = "r") |>
+  mutate(a = factor(a, levels = all_vars), b = factor(b, levels = rev(all_vars))) |>
+  ggplot(aes(a, b, fill = r)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = sprintf("%.2f", r)), size = 2.6) +
+  scale_fill_gradient2(low = "#c0392b", mid = "white", high = "#2a6f97", limits = c(-1, 1)) +
+  labs(title = "Correlation between district features (after transformation)", x = NULL, y = NULL, fill = "r") +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1))
+save_fig(p_cor, "fig02_feature_correlation", dir = paths$fig_rq2, height = 5.5)
+```
+
+## Variance inflation factor (VIF)
+
+A correlation only compares two features at a time. The **variance inflation factor** asks whether a feature can
+be predicted from *all* the others together:
+
+$$\text{VIF}_j = \frac{1}{1 - R^2_j}$$
+
+where $R^2_j$ is the R² from regressing feature *j* on every other feature. A VIF of 1 means the feature is
+unrelated to the others. A VIF of 5 means 80% of its variation is already in the others ($R^2_j$ = 0.8). The usual
+warning level is 5, and above 10 is a clear problem. The name comes from regression, where it is the factor by
+which overlap inflates the variance of a coefficient. Here we use it as a measure of redundancy.
+
+```{r vif-all}
+vif_table(tf |> select(all_of(all_vars))) |> arrange(desc(vif)) |>
+  kable(digits = 2, caption = "VIF with all eleven features")
+```
+
+**Observation.** `house_share` has a VIF of about 19 and `town_share` about 10. Houses, apartments, retirement
+units and townhouses are the four kinds of new dwelling, so their shares add up to exactly 1, and any one of them is
+fully determined by the other three. On the original scale this is perfect **collinearity** and the VIF is infinite
+(below). The square root bends the relationship slightly, so after transforming it is "only" 19. We drop
+`house_share`: a low share of everything else already means a high share of houses.
+
+```{r vif-shares-raw}
+vif_table(feat |> select(house_share, apt_share, retire_share, town_share)) |>
+  kable(digits = 2, caption = "VIF of the four shares on their original scale")
+```
+
+```{r vif-no-house}
+vars_10 <- setdiff(all_vars, "house_share")
+vif_table(tf |> select(all_of(vars_10))) |> arrange(desc(vif)) |>
+  kable(digits = 2, caption = "VIF without house_share")
+```
+
+**Observation.** Without `house_share`, two features still have a VIF of about 7: `dwell_per_1000` and
+`alt_share`. They are the two ends of one idea. A district that builds a lot of new housing for its population (high intensity)
+has, almost by definition, a small share of its residential spending going to alterations. Keeping both would count
+"how much is being built" twice. We drop `alt_share` and keep `dwell_per_1000`, which is easier to interpret and
+does not depend on how alterations are valued.
+
+```{r vif-final}
+cluster_vars <- setdiff(vars_10, "alt_share")
+vif_final <- vif_table(tf |> select(all_of(cluster_vars))) |> arrange(desc(vif))
+save_tab(vif_final, "t01_vif", dir = paths$tab_rq2) |> kable(digits = 2, caption = "VIF of the nine clustering features")
+```
+
+**Observation.** All nine features now have VIF below 2.5. They overlap a little (no two are unrelated), but none
+repeats the others, so each adds its own information to the distance.
+
+## Volatility and district size
+
+```{r volatility-size}
+c(cor_volatility_log_size = cor(tf$volatility, log(tf$dwellings)))
+```
+
+**Observation.** Volatility is negatively correlated with district size. Part of this is real (small rural
+economies swing more), and part is counting noise: 20 dwellings one year and 30 the next is a 41% jump, while
+2,000 to 2,010 is under 1%. We keep volatility because the pitch named it, but we will check in Step 2 how much the
+clusters depend on it.
+
+# A first look at the structure: principal component analysis (PCA)
+
+With nine features we can't plot the districts directly. **Principal component analysis** finds new axes
+(principal components), each a weighted combination of the standardised features, chosen so that the first axis
+captures as much of the spread between districts as possible, the second as much of the rest as possible, and so
+on. The weights are called **loadings**. Plotting the first two components is the best two-dimensional picture of
+the nine-dimensional data. We use PCA only to *look* at the data; the clustering in Step 2 uses all nine features.
+
+```{r pca}
+X <- scale(tf |> select(all_of(cluster_vars)))
+rownames(X) <- str_remove(tf$ta, " District| City")
+pca <- prcomp(X)
+
+pca_var <- tibble(component = paste0("PC", 1:9), variance_share = pca$sdev^2 / sum(pca$sdev^2),
+                  cumulative = cumsum(variance_share))
+kable(head(pca_var, 5), digits = 3, caption = "Share of the variance captured by each component")
+
+as_tibble(pca$rotation[, 1:3], rownames = "feature") |> arrange(desc(abs(PC1))) |>
+  kable(digits = 2, caption = "Loadings of the first three components")
+```
+
+```{r pca-plot, fig.height = 5.5}
+pca_df <- as_tibble(pca$x[, 1:2]) |> mutate(name = rownames(X), island = tf$island, is_city = tf$is_city)
+p_pca <- ggplot(pca_df, aes(PC1, PC2)) +
+  geom_hline(yintercept = 0, colour = "grey85") + geom_vline(xintercept = 0, colour = "grey85") +
+  geom_point(aes(colour = island), size = 2) +
+  geom_text(aes(label = name), size = 2.3, vjust = -0.8, check_overlap = TRUE) +
+  scale_colour_manual(values = c(North = "#2a6f97", South = "#e07a1f")) +
+  scale_x_continuous(expand = expansion(mult = 0.1)) +
+  labs(title = "Districts on the first two principal components",
+       subtitle = sprintf("PC1 and PC2 capture %.0f%% of the variance. Some labels are hidden where they overlap.",
+                          100 * pca_var$cumulative[2]),
+       x = sprintf("PC1 (%.0f%%): building intensity, bigger houses  →", 100 * pca_var$variance_share[1]),
+       y = sprintf("PC2 (%.0f%%): denser and dearer  →", 100 * pca_var$variance_share[2]), colour = NULL) +
+  theme(legend.position = "top")
+save_fig(p_pca, "fig03_pca_districts", dir = paths$fig_rq2, height = 5.5, width = 8)
+```
+
+**Observation.**
+
+* **PC1** (about 30% of the variance) contrasts districts that build a lot for their population, with bigger houses
+  and more retirement units, against districts with slow, volatile building and a larger non-residential share.
+  It reads as "growing residential market vs slow provincial economy".
+* **PC2** (about 22%) is mainly apartments, townhouses and cost. It separates the dense, dear urban markets from
+  the rest.
+* Together they capture only about half of the variance. The other half is spread over several smaller directions,
+  so no single picture shows everything.
+* The points form one broad cloud rather than clearly separated groups. The dense urban districts (Wellington,
+  Lower Hutt, Auckland) sit at the top, Queenstown-Lakes far to the right, and small slow-building districts such as
+  Kawerau and Wairoa far to the left. That warns us that any clusters will divide a continuum rather than find natural, well-separated
+  types. Step 2 measures this formally.
+
+# Save
+
+```{r save}
+features_out <- list(
+  raw          = feat,                 # natural units, all features, for describing clusters
+  transformed  = tf,                   # after square-root and log transforms
+  cluster_vars = cluster_vars,         # the nine features used for clustering
+  window       = paste(min(win$yq), "to", max(win$yq)),
+  notes        = "Chatham Islands excluded; house_share and alt_share dropped (VIF)")
+saveRDS(features_out, file.path(paths$processed, "rq2_district_features.rds"))
+write_csv(feat, file.path(paths$processed, "rq2_district_features.csv"))
+list.files(paths$processed, pattern = "rq2")
+```
+
+# Summary of decisions
+
+| # | Decision | Reason |
+|---|---|---|
+| 1 | One row per district; 66 districts (Chatham Islands out) | RQ2 is about markets, not quarters; 34 dwellings in ten years is too few |
+| 2 | Window 2016Q3–2026Q2; growth = second vs first five years; volatility over 2006–2025 | Recent but long enough to be stable; volatility needs a full cycle |
+| 3 | Size left out of the clustering, used to describe clusters | Otherwise clusters would just rank districts by size |
+| 4 | Square root for shares, log for intensity and volatility | Reduce skew so single districts don't form their own clusters |
+| 5 | Standardise all features | Equal weight in the distance regardless of units |
+| 6 | Drop `house_share` (VIF infinite) and `alt_share` (VIF ≈ 7) | Avoid counting the same information twice |
+| 7 | Nine clustering features, all VIF < 2.5 | Type mix (3), intensity, growth, volatility, cost, house size, non-residential share |
+
+**Next (Step 2):** cluster the 66 districts with k-means and hierarchical clustering, choose the number of
+clusters, compare the two methods, and describe the clusters.
+
+# Appendix: helper functions
+
+This notebook uses helper functions from `R/utils_data.R` and `R/utils_cluster.R`, printed here so the document is
+complete on its own.
+
+```{r appendix-utils-data, code = readLines(file.path(proj_root, "R", "utils_data.R")), eval = FALSE}
+```
+
+```{r appendix-utils-cluster, code = readLines(file.path(proj_root, "R", "utils_cluster.R")), eval = FALSE}
+```
+
+```{r session, include = FALSE}
+sessionInfo()
+```

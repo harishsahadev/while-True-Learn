@@ -17,7 +17,9 @@ paths <- list(
   reference     = "data/reference",
   processed     = "data/processed",
   fig_rq1       = "outputs/figures/rq1",
-  tab_rq1       = "outputs/tables/rq1"
+  tab_rq1       = "outputs/tables/rq1",
+  fig_rq2       = "outputs/figures/rq2",
+  tab_rq2       = "outputs/tables/rq2"
 )
 
 # ---- Reading Stats NZ "Infoshare" long-format CSVs --------------------------

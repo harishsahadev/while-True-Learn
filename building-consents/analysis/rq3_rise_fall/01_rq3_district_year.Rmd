@@ -1,0 +1,325 @@
+---
+title: "RQ3 Step 1: The district-year table, the label and the features"
+subtitle: "Will a district's consents rise or fall next year?"
+author: "while True: learn(), Group 8, STAT462"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: show
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE,
+                      fig.align = "center", out.width = "85%")
+find_proj_root <- function(path = getwd()) {
+  path <- normalizePath(path)
+  repeat {
+    if (length(list.files(path, pattern = "\\.Rproj$"))) return(path)
+    parent <- dirname(path)
+    if (parent == path) stop("No .Rproj file found above ", getwd())
+    path <- parent
+  }
+}
+proj_root <- find_proj_root()
+knitr::opts_knit$set(root.dir = proj_root)
+```
+
+```{r load}
+source(file.path(proj_root, "R", "utils_data.R"))
+source(file.path(proj_root, "R", "utils_models.R"))
+source(file.path(proj_root, "R", "utils_classify.R"))
+library(knitr)
+
+# ---- Settings for this notebook -------------------------------------------
+FIRST_YEAR <- 1996   # first feature year: needs five earlier years of history (1991-95)
+LAST_YEAR  <- 2024   # last feature year: its label needs 2025, the last complete year
+TRAIN_LAST <- 2016   # train on feature years up to 2016, test on 2017-2024
+
+full <- read_csv(file.path(paths$processed, "rq1_district_quarter_full.csv"), show_col_types = FALSE) |>
+  filter(ta != "Chatham Islands Territory")
+range(full$yq)
+```
+
+# Purpose
+
+**Research question 3:** *Will a district's consents rise or fall next year?*
+
+This is a **binary classification** problem. For each district and year we know what happened up to the end of that
+year, and we predict whether the number of new dwellings consented **next** year will be higher (rise) or not (fall).
+The pitch proposed logistic regression, linear discriminant analysis (LDA) and a classification tree.
+
+This notebook builds the table (one row per district and year), defines the label, builds the features, and
+explores them. Models are in Step 2.
+
+# One row per district and year
+
+We add up the quarterly district table from RQ1 into **calendar years**. 1990 is incomplete (it starts in April)
+and 2026 is incomplete (it ends in June), so complete years run from 1991 to 2025. As in RQ2, the Chatham Islands
+are left out: about three new dwellings a year give a label that is mostly noise, with many years of no change.
+
+```{r annual}
+annual <- full |>
+  filter(year >= 1991, year <= 2025) |>
+  group_by(ta, region, island, is_city, year) |>
+  summarise(quarters  = n(),
+            dwellings = sum(dwell_n),
+            houses    = sum(houses_n),
+            h1        = sum(dwell_n[quarter <= 2]),       # January-June
+            h2        = sum(dwell_n[quarter >= 3]),       # July-December
+            alt_real  = sum(resid_alt_val * real_factor),
+            nonres_real = sum(nonres_new_val * real_factor),
+            dwell_per_1000 = dwell_per_1000[quarter == 4],  # the 12 months to December
+            .groups = "drop")
+stopifnot(all(annual$quarters == 4))
+c(districts = n_distinct(annual$ta), years = n_distinct(annual$year), rows = nrow(annual))
+```
+
+# The label: rise or fall next year
+
+$$\text{rise}_{d,t} = 1 \text{ if new dwellings}_{d,t+1} > \text{new dwellings}_{d,t}, \text{ otherwise } 0.$$
+
+We use **new dwellings** (all types), the headline count of the consents data. A year with *exactly* the same number
+as the year before counts as "not rising". Those ties are rare and only happen in very small districts.
+
+```{r label}
+annual <- annual |>
+  group_by(ta) |>
+  arrange(year, .by_group = TRUE) |>
+  mutate(next_dwellings = lead(dwellings),
+         rise = as.integer(next_dwellings > dwellings),
+         tie  = next_dwellings == dwellings) |>
+  ungroup()
+
+annual |> filter(!is.na(rise)) |>
+  summarise(rows = n(), share_rising = mean(rise), ties = sum(tie), share_ties = mean(tie)) |> kable(digits = 3)
+```
+
+**Observation.** Overall, rises and falls are close to balanced, so accuracy is a fair measure and no re-weighting of
+classes is needed. Ties are under 2% of rows.
+
+# Features: what is known at the end of year *t*
+
+Every feature uses information available on 31 December of year *t*, so the model could have been used at that
+date to predict year *t* + 1. Nothing from year *t* + 1 is used.
+
+| Feature | Definition | Why it might predict next year |
+|---|---|---|
+| `log_dwellings` | log(1 + new dwellings in year *t*) | Size; small districts swing more |
+| `growth_1y` | log change in dwellings from *t* − 1 to *t* | Momentum (a rise continues) or reversal (a rise is followed by a fall) |
+| `growth_2y` | log change from *t* − 2 to *t* | Longer momentum |
+| `dev_5y` | log(dwellings in *t*) minus the average log of the previous five years | Above its usual level, a district may fall back (mean reversion) |
+| `h2_vs_h1` | log(dwellings July–December ÷ January–June) in year *t* | Direction at the end of the year: a strong second half points upwards |
+| `alt_growth` | log change in real residential alteration value | Spending on existing homes as a sign of local demand |
+| `nonres_growth` | log change in real non-residential value | Local business investment |
+| `multiunit_share` | share of new dwellings that are not stand-alone houses | Apartment and townhouse projects come in lumps, so they make counts jumpy |
+| `dwell_per_1000` | new dwellings per 1,000 residents in the year | Building intensity relative to the population |
+| `nat_growth_1y` | the same as `growth_1y` for New Zealand as a whole | National cycle |
+| `nat_dev_5y` | the same as `dev_5y` for New Zealand | Is the country above its usual level? |
+| `nat_h2_vs_h1` | the same as `h2_vs_h1` for New Zealand | National direction at the end of the year |
+
+`+ 1` inside the logs avoids log(0) for districts with no dwellings in a year or half-year.
+
+```{r features}
+lg <- function(x) log(x + 1)
+mean_prev5 <- function(x) (lag(x, 1) + lag(x, 2) + lag(x, 3) + lag(x, 4) + lag(x, 5)) / 5
+
+nat <- annual |>
+  group_by(year) |>
+  summarise(nat_dwellings = sum(dwellings), nat_h1 = sum(h1), nat_h2 = sum(h2), .groups = "drop") |>
+  arrange(year) |>
+  mutate(nat_growth_1y = lg(nat_dwellings) - lag(lg(nat_dwellings)),
+         nat_dev_5y    = lg(nat_dwellings) - mean_prev5(lg(nat_dwellings)),
+         nat_h2_vs_h1  = log(nat_h2 / nat_h1),
+         nat_rise_next = as.integer(lead(nat_dwellings) > nat_dwellings))
+
+rq3 <- annual |>
+  group_by(ta) |>
+  arrange(year, .by_group = TRUE) |>
+  mutate(log_dwellings   = lg(dwellings),
+         growth_1y       = log_dwellings - lag(log_dwellings, 1),
+         growth_2y       = log_dwellings - lag(log_dwellings, 2),
+         dev_5y          = log_dwellings - mean_prev5(log_dwellings),
+         h2_vs_h1        = lg(h2) - lg(h1),
+         alt_growth      = lg(alt_real) - lag(lg(alt_real)),
+         nonres_growth   = lg(nonres_real) - lag(lg(nonres_real)),
+         multiunit_share = if_else(dwellings > 0, 1 - houses / dwellings, 0)) |>
+  ungroup() |>
+  left_join(nat |> select(year, nat_growth_1y, nat_dev_5y, nat_h2_vs_h1, nat_rise_next), by = "year")
+
+# 2025 rows: features are known, the outcome (2026) is not. Kept aside for forecasting (used by the app).
+forecast <- rq3 |> filter(year == LAST_YEAR + 1)
+
+rq3 <- rq3 |>
+  filter(year >= FIRST_YEAR, year <= LAST_YEAR) |>
+  mutate(split = if_else(year <= TRAIN_LAST, "train", "test"))
+
+features <- c("log_dwellings", "growth_1y", "growth_2y", "dev_5y", "h2_vs_h1", "alt_growth", "nonres_growth",
+              "multiunit_share", "dwell_per_1000", "nat_growth_1y", "nat_dev_5y", "nat_h2_vs_h1")
+c(rows = nrow(rq3), missing_values = sum(is.na(rq3[c(features, "rise")])))
+rq3 |> count(split, name = "rows") |>
+  left_join(rq3 |> group_by(split) |> summarise(years = paste(min(year), "to", max(year)), share_rising = mean(rise)),
+            by = "split") |> kable(digits = 3, caption = "Train and test district-years")
+```
+
+**Observation.** Every row has every feature, because rows start in 1996: `dev_5y` needs five earlier years
+(1991–95), and `dwell_per_1000` starts in 1996. The pitch counted 1,742 training rows from 1991. Starting in 1996
+gives fewer but complete rows (no imputation). The split is by time again: train on feature years 1996–2016 (labels
+1997–2017), test on 2017–2024 (labels 2018–2025).
+
+# How much does the year matter?
+
+```{r by-year, fig.height = 3.8}
+by_year <- rq3 |> group_by(year, split) |>
+  summarise(share_rising = mean(rise), nat_rise = first(nat_rise_next), .groups = "drop")
+
+p_year <- ggplot(by_year, aes(year + 1, share_rising)) +
+  annotate("rect", xmin = TRAIN_LAST + 1.5, xmax = Inf, ymin = -Inf, ymax = Inf, alpha = 0.1, fill = "#e07a1f") +
+  geom_hline(yintercept = 0.5, colour = "grey60") +
+  geom_col(aes(fill = factor(nat_rise, labels = c("NZ fell", "NZ rose")))) +
+  scale_fill_manual(values = c("NZ fell" = "#2a6f97", "NZ rose" = "#e76f51")) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Share of districts whose new dwellings rose, by year",
+       subtitle = "Colour = whether New Zealand's total rose that year. Shaded = test years.",
+       x = "Year of the outcome (t + 1)", y = "Districts rising", fill = NULL) +
+  theme(legend.position = "top")
+save_fig(p_year, "fig01_share_rising_by_year", dir = paths$fig_rq3, height = 3.8)
+
+# how much of the label's variation is "which year it is"?
+summary(lm(rise ~ factor(year), data = rq3 |> filter(split == "train")))$r.squared
+```
+
+**Observation.** The share of districts rising swings enormously from year to year: from about 12% (2009, during the
+global financial crisis) to about 88% (2021, the post-COVID boom). Districts mostly rise and fall **together**, with
+the national building cycle. When New Zealand as a whole rose (red), most districts rose; when it fell (blue), most
+fell.
+
+Knowing only *which year* it is explains about `r fmt_pct(summary(lm(rise ~ factor(year), data = rq3 |> filter(split == "train")))$r.squared, 0)`
+of the variation in the label (R² of a linear model on year alone). That is a lot for a 0/1 label. It means a large
+part of the problem is predicting the **national** direction next year, which no district feature can know for
+certain. This puts a ceiling on how well any model can do, and it is why the national features are included.
+
+The test years are harder than the training years in one respect: they include the sharp turn after the 2021 boom: 88% of
+districts rose in 2021, but under 25% rose in 2023 and in 2024.
+
+# Features against the label
+
+```{r feature-boxplots, fig.height = 6}
+p_box <- rq3 |> filter(split == "train") |>
+  select(rise, all_of(features)) |>
+  pivot_longer(-rise, names_to = "feature") |>
+  mutate(feature = factor(feature, levels = features),
+         outcome = factor(rise, levels = 0:1, labels = c("fell next year", "rose next year"))) |>
+  ggplot(aes(outcome, value, fill = outcome)) +
+  geom_boxplot(outlier.size = 0.3, show.legend = FALSE) +
+  facet_wrap(~feature, scales = "free_y", ncol = 4) +
+  scale_fill_manual(values = c("fell next year" = "#2a6f97", "rose next year" = "#e76f51")) +
+  labs(title = "Each feature for district-years that fell or rose next year (training rows)", x = NULL, y = NULL)
+save_fig(p_box, "fig02_features_by_outcome", dir = paths$fig_rq3, height = 6, width = 8.5)
+```
+
+A simple way to measure how much each feature *on its own* separates rises from falls is its **AUC**: the
+probability that a randomly chosen "rise" row has a higher value of the feature than a randomly chosen "fall" row.
+0.5 means no separation. Values below 0.5 mean the feature separates in the other direction (lower values go with
+rises), so we also show max(AUC, 1 − AUC).
+
+```{r univariate}
+uni <- tibble(feature = features) |>
+  mutate(auc = map_dbl(feature, \(v) auc(rq3$rise[rq3$split == "train"], rq3[[v]][rq3$split == "train"])),
+         separation = pmax(auc, 1 - auc),
+         direction = if_else(auc > 0.5, "higher → rise", "higher → fall")) |>
+  arrange(desc(separation))
+save_tab(uni, "t01_univariate_auc", dir = paths$tab_rq3) |>
+  kable(digits = 3, caption = "Single-feature AUC on the training rows")
+```
+
+**Observation.** No single feature separates rises from falls well: the best AUC is about 0.62, where 0.5 is
+guessing. The strongest signals are:
+
+* **End-of-year momentum**, nationally (`nat_h2_vs_h1`) and in the district (`h2_vs_h1`). If the second half of the
+  year was busier than the first, next year tends to be higher.
+* **The national level vs its five-year average** (`nat_dev_5y`). Higher goes with rising, so the national cycle
+  shows momentum over a one-year horizon.
+* **Building intensity and the multi-unit share** point the other way: districts already building a lot per
+  resident, or relying on apartment and townhouse projects, are slightly more likely to fall next year.
+* The district's **own growth this year** (`growth_1y`, `dev_5y`) has a weak *negative* link: a district that
+  jumped this year is slightly more likely to fall back next year (mean reversion), while the national series shows
+  momentum.
+
+The signal is weak but consistent. Step 2 will show how much the models can combine it.
+
+# Overlap between features (correlation and VIF)
+
+Logistic regression and LDA are both linear models, and their coefficients become unstable when features overlap.
+We check the variance inflation factor (VIF = 1 / (1 − R²) from regressing each feature on the others; see RQ2
+Step 1).
+
+```{r vif}
+vif_rq3 <- function(df) map_dbl(names(df), function(v)
+  1 / (1 - summary(lm(reformulate(setdiff(names(df), v), v), data = df))$r.squared)) |> set_names(names(df))
+train_x <- rq3 |> filter(split == "train") |> select(all_of(features))
+vif_all <- vif_rq3(train_x)
+tibble(feature = names(vif_all), vif = vif_all) |> arrange(desc(vif)) |> kable(digits = 2, caption = "VIF, all twelve features")
+round(cor(train_x$growth_1y, train_x$growth_2y), 2)
+```
+
+**Observation.** No feature reaches the usual warning level of 5. The highest are `dev_5y` (4.6) and `growth_2y`
+(3.7). These three growth measures overlap by construction: `growth_2y` is this year's growth plus last year's, and
+both are part of `dev_5y`. `growth_2y` is also the weakest feature on its own (AUC 0.51). We drop it, which brings
+every VIF below 3 and leaves eleven features.
+
+```{r vif-final}
+features_final <- setdiff(features, "growth_2y")
+vif_final <- vif_rq3(train_x |> select(all_of(features_final)))
+tibble(feature = names(vif_final), vif = vif_final) |> arrange(desc(vif)) |>
+  save_tab("t02_vif", dir = paths$tab_rq3) |> kable(digits = 2, caption = "VIF, final eleven features")
+```
+
+# Save
+
+```{r save}
+rq3_model <- rq3 |>
+  select(ta, region, island, is_city, year, split, rise, dwellings, next_dwellings, nat_rise_next,
+         all_of(features)) |>
+  mutate(rise_f = factor(rise, levels = 0:1, labels = c("fall", "rise")))
+saveRDS(list(data = rq3_model, features = features_final, all_features = features,
+             forecast = forecast |> select(ta, region, island, is_city, year, dwellings, all_of(features))),
+        file.path(paths$processed, "rq3_model_data.rds"))
+write_csv(rq3_model, file.path(paths$processed, "rq3_model_data.csv"))
+dim(rq3_model)
+```
+
+# Summary of decisions
+
+| # | Decision | Reason |
+|---|---|---|
+| 1 | One row per district and calendar year; 66 districts | The question is about next year; Chatham Islands too small |
+| 2 | Label = new dwellings next year > this year (ties = not rising) | The headline count; ties are under 2% |
+| 3 | Features use only information available at the end of year *t* | The model must be usable at the time of prediction |
+| 4 | Feature years 1996–2024; train 1996–2016, test 2017–2024 | Five years of history for `dev_5y`; `dwell_per_1000` starts in 1996; time-ordered test |
+| 5 | National features included | Districts move with the national cycle |
+| 6 | Drop `growth_2y` | Overlaps `growth_1y` and `dev_5y` and adds nothing on its own (AUC 0.51) |
+
+**Next (Step 2):** fit and compare classifiers (baselines, logistic regression, LDA, QDA, a
+classification tree, k-nearest neighbours, lasso logistic regression and a random forest), tuned by time-ordered
+cross-validation and tested once on 2017–2024.
+
+# Appendix: helper functions
+
+This notebook uses helper functions from `R/utils_data.R`, `R/utils_models.R` and `R/utils_classify.R`, printed
+here so the document is complete on its own.
+
+```{r appendix-utils-data, code = readLines(file.path(proj_root, "R", "utils_data.R")), eval = FALSE}
+```
+
+```{r appendix-utils-models, code = readLines(file.path(proj_root, "R", "utils_models.R")), eval = FALSE}
+```
+
+```{r appendix-utils-classify, code = readLines(file.path(proj_root, "R", "utils_classify.R")), eval = FALSE}
+```
+
+```{r session, include = FALSE}
+sessionInfo()
+```

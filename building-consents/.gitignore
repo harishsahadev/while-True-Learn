@@ -21,3 +21,11 @@ building-consents-analysis.html
 
 # Office lock files
 ~$*
+
+# built submission zip
+submission/
+
+# archived earlier versions of the poster and slides (kept locally only)
+communication/earlier_versions/
+# slides.html only works on the machine that built it (absolute file paths); slides.pdf/.pptx are the outputs
+communication/slides/slides.html

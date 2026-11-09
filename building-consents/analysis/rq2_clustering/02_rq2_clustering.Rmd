@@ -1,0 +1,593 @@
+---
+title: "RQ2 Step 2: Clustering districts into building markets"
+subtitle: "What kinds of building markets does New Zealand have?"
+author: "while True: learn(), Group 8, STAT462"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: show
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE,
+                      fig.align = "center", out.width = "85%")
+find_proj_root <- function(path = getwd()) {
+  path <- normalizePath(path)
+  repeat {
+    if (length(list.files(path, pattern = "\\.Rproj$"))) return(path)
+    parent <- dirname(path)
+    if (parent == path) stop("No .Rproj file found above ", getwd())
+    path <- parent
+  }
+}
+proj_root <- find_proj_root()
+knitr::opts_knit$set(root.dir = proj_root)
+
+# cached chunks re-run if the features or the helper file change
+file_md5 <- tools::md5sum(file.path(proj_root, c("data/processed/rq2_district_features.rds", "R/utils_cluster.R")))
+knitr::opts_chunk$set(cache.extra = file_md5)
+```
+
+```{r load}
+source(file.path(proj_root, "R", "utils_data.R"))
+source(file.path(proj_root, "R", "utils_cluster.R"))
+library(knitr)
+library(cluster)     # silhouette, gap statistic
+
+rq2  <- readRDS(file.path(paths$processed, "rq2_district_features.rds"))
+raw  <- rq2$raw                    # natural units, for describing clusters
+vars <- rq2$cluster_vars
+short <- str_remove(rq2$transformed$ta, " District| City")
+
+# standardised feature matrix: one row per district, mean 0 and SD 1 per column
+X <- scale(rq2$transformed |> select(all_of(vars)))
+rownames(X) <- short
+D <- dist(X)                       # Euclidean distances between all pairs of districts
+c(districts = nrow(X), features = ncol(X), pairs = length(D))
+```
+
+# Purpose and plan
+
+Step 1 described each of the 66 districts with nine standardised features: three type-mix shares, building
+intensity, growth, volatility, relative cost, house size and non-residential share. Here we group districts whose
+profiles are similar, with two methods from the course:
+
+* **k-means**, which divides the districts into *k* groups around *k* centres;
+* **hierarchical clustering**, which builds a tree of nested groups and cuts it at *k* groups.
+
+Clustering has no "right answer" to check against, unlike RQ1's test set. Instead we ask:
+
+1. How many clusters does the data support? (several criteria, section 4)
+2. Do the two methods agree? (section 6)
+3. Are the clusters stable when the data are resampled? (section 4)
+4. Do the clusters make sense as kinds of market? (section 7)
+
+# Distance between districts
+
+Both methods need a measure of how different two districts are. We use the **Euclidean distance** on the
+standardised features: the straight-line distance in nine dimensions,
+
+$$d(a, b) = \sqrt{\sum_{j=1}^{9} (x_{aj} - x_{bj})^2}.$$
+
+Standardising (Step 1) gives every feature the same weight. Euclidean distance is also what k-means minimises, so
+using it for hierarchical clustering too keeps the two methods comparable.
+
+```{r distances}
+dm <- as.matrix(D)
+diag(dm) <- NA
+closest <- tibble(district = rownames(dm),
+                  nearest = colnames(dm)[apply(dm, 1, which.min)],
+                  distance = apply(dm, 1, min, na.rm = TRUE))
+bind_rows(closest |> filter(district %in% c("Selwyn", "Wellington", "Queenstown-Lakes", "Gore", "Auckland")),
+          closest |> slice_max(distance, n = 3)) |>
+  distinct() |> kable(digits = 2, caption = "Nearest neighbour of some districts (and the three most isolated)")
+```
+
+**Observation.** The nearest neighbours make sense: Selwyn's closest match is another fast-growing Canterbury or
+Waikato district, and Gore's is another small southern district. The most isolated districts are the ones that
+stood out in the Step 1 PCA plot. They will sit at the edge of whichever cluster they join.
+
+# k-means
+
+## How it works
+
+k-means looks for *k* centres (each a point in the nine-dimensional feature space) and assigns each district to its
+nearest centre. It repeats two steps until nothing changes:
+
+1. **assign** every district to the closest centre;
+2. **update** each centre to the mean of the districts assigned to it.
+
+This lowers the **within-cluster sum of squares (WSS)**, the total squared distance from each district to its
+centre, at every step. A low WSS means tight clusters.
+
+**Parameters of `kmeans()` and what they do:**
+
+| Parameter | Meaning | Our choice | Effect |
+|---|---|---|---|
+| `centers` (*k*) | number of clusters | chosen in section 4 | the main hyperparameter: more clusters always lower WSS, so WSS alone can't choose *k* |
+| `nstart` | number of random starting centres | 50 | k-means only finds a *local* minimum that depends on the start; more starts make it more likely to find the best one |
+| `iter.max` | maximum assign/update rounds | 100 | only needs to be large enough to converge; ours converge in a few rounds |
+| `algorithm` | update rule | Hartigan–Wong (default) | usually finds lower WSS than the simpler Lloyd algorithm |
+| seed | starting point of the random numbers | 462 | makes the result reproducible |
+
+## Why `nstart` matters
+
+```{r nstart, cache = TRUE}
+set.seed(462)
+single_start <- map_dbl(1:200, \(i) kmeans(X, centers = 3, nstart = 1)$tot.withinss)
+set.seed(462)
+many_start <- kmeans(X, centers = 3, nstart = 50)$tot.withinss
+c(best_of_200_single = min(single_start), share_of_single_starts_at_best = mean(abs(single_start - many_start) < 1e-6),
+  worst_single = max(single_start), nstart_50 = many_start)
+```
+
+**Observation.** With a single random start, k-means reaches the best WSS in only
+`r fmt_pct(mean(abs(single_start - many_start) < 1e-6), 0)` of runs; the others stop at worse local solutions
+(up to `r round(max(single_start))` instead of `r round(many_start)`). With 50 starts, k-means keeps the best of the
+50, so the result no longer depends on luck.
+
+# How many clusters?
+
+The number of clusters *k* is the key hyperparameter. There is no single correct rule, so we compute five criteria
+for *k* = 2 to 8:
+
+| Criterion | Idea | Best *k* |
+|---|---|---|
+| **Elbow (WSS)** | WSS always falls as *k* rises; look for the point where it stops falling quickly | the "bend" |
+| **Silhouette width** | for each district: (distance to the nearest *other* cluster − average distance within its own cluster) ÷ the larger of the two. Ranges from −1 to 1; above 0.5 is strong structure, 0.25–0.5 weak, below 0.25 little | highest average |
+| **Calinski–Harabasz (CH)** | between-cluster variance ÷ within-cluster variance, adjusted for *k* (an ANOVA *F* ratio for the clustering) | highest |
+| **Gap statistic** | how much lower the WSS is than for data with *no* clusters (random uniform data in the same range) | smallest *k* within one SE of the best |
+| **Bootstrap stability** | resample the districts, re-cluster, and measure agreement with the original (adjusted Rand index, below) | highest |
+
+```{r choose-k, cache = TRUE}
+ks <- 2:8
+set.seed(462)
+criteria <- map_dfr(ks, function(k) {
+  km <- kmeans(X, centers = k, nstart = 50, iter.max = 100)
+  tibble(k,
+         wss         = km$tot.withinss,
+         silhouette  = mean_silhouette(km$cluster, D),
+         ch          = calinski_harabasz(X, km$cluster),
+         stability   = mean(boot_stability(X, \(x) kmeans_labels(x, k), B = 100)),
+         smallest    = min(table(km$cluster)))
+})
+
+set.seed(462)
+gap <- clusGap(X, FUNcluster = kmeans, K.max = 8, B = 200, nstart = 25, iter.max = 100)
+gap_tab <- as_tibble(gap$Tab) |> mutate(k = row_number())
+gap_k <- maxSE(gap$Tab[, "gap"], gap$Tab[, "SE.sim"], method = "Tibs2001SEmax")
+```
+
+```{r choose-k-table}
+criteria |> left_join(gap_tab |> select(k, gap, gap_se = SE.sim), by = "k") |>
+  save_tab("t02_choose_k", dir = paths$tab_rq2) |>
+  kable(digits = 3, caption = "k-means: criteria for the number of clusters")
+c(gap_statistic_choice = gap_k, gap_k1 = gap_tab$gap[1], gap_k1_se = gap_tab$SE.sim[1])
+```
+
+```{r choose-k-plot, fig.height = 5}
+p_k <- criteria |>
+  full_join(gap_tab |> select(k, gap), by = "k") |>          # the gap statistic also has k = 1
+  select(k, `Within-cluster SS (elbow)` = wss, `Mean silhouette` = silhouette,
+         `Calinski-Harabasz` = ch, `Gap statistic` = gap, `Bootstrap stability (ARI)` = stability) |>
+  pivot_longer(-k) |>
+  ggplot(aes(k, value)) +
+  geom_line(colour = "#2a6f97") + geom_point(colour = "#2a6f97", size = 2) +
+  geom_vline(xintercept = 3, linetype = 2, colour = "#e76f51") +
+  facet_wrap(~name, scales = "free_y", ncol = 3) +
+  scale_x_continuous(breaks = 1:8) +
+  labs(title = "Choosing the number of clusters (k-means)",
+       subtitle = "Dashed line = the k we use (3). Only the gap statistic can be computed for k = 1.",
+       x = "Number of clusters k", y = NULL)
+save_fig(p_k, "fig04_choose_k", dir = paths$fig_rq2, height = 5, width = 8.5)
+```
+
+**Observation.** The criteria don't all point the same way, which is common with real data.
+
+* **Elbow:** WSS falls steadily with no clear bend, so it gives no answer.
+* **Silhouette** and **Calinski–Harabasz** are highest at *k* = 2 and only slightly lower at *k* = 3 (silhouette
+  `r round(criteria$silhouette[criteria$k == 2], 3)` vs `r round(criteria$silhouette[criteria$k == 3], 3)`).
+* **Bootstrap stability** is clearly highest at *k* = 3 (`r round(criteria$stability[criteria$k == 3], 2)`): resampled
+  data reproduce the same three groups most reliably.
+* The **gap statistic** chooses *k* = 1. The gap at *k* = 1 (`r round(gap_tab$gap[1], 3)`) is as large as at any other
+  *k*, so the districts are not more clustered than random data spread over the same range.
+
+The most important finding is that **the cluster structure is weak**. All silhouette widths are near 0.2 (below the
+0.25 usually needed for even "weak" structure), and the gap statistic finds no clear clusters. New Zealand's
+districts form a **continuum** of markets, not a few sharply different types, which matches the single cloud in
+the Step 1 PCA plot. Clustering is still useful here, but as a way to **summarise** the continuum into a few
+recognisable kinds of market, not as proof of natural types.
+
+**Decision: *k* = 3.** It is the most stable choice, nearly as good as *k* = 2 on silhouette and CH, and more
+informative than two groups. With *k* ≥ 5, small clusters of 3–4 districts appear and stability drops.
+
+# Hierarchical clustering
+
+## How it works
+
+Agglomerative hierarchical clustering starts with every district in its own cluster and repeatedly **merges the two
+closest clusters** until only one is left. The full history of merges is a tree, the **dendrogram**. Cutting the
+tree at a height gives a set of clusters; cutting it to leave *k* branches gives *k* clusters. Unlike k-means there
+are no random starts: the result is the same every time.
+
+The method needs a rule for the distance between two *clusters* (not just two districts). This is the **linkage**,
+its main parameter:
+
+| Linkage (`method`) | Distance between clusters A and B | Typical result |
+|---|---|---|
+| `single` | closest pair, one from A and one from B | long chains; outliers left on their own |
+| `complete` | farthest pair | compact clusters, sensitive to outliers |
+| `average` | average over all pairs | between single and complete |
+| `ward.D2` | merge the pair that increases the total within-cluster sum of squares the least | compact, similar-sized clusters; same goal as k-means |
+
+`ward.D2` is the correct form of Ward's method for Euclidean distances (`ward.D` expects squared distances).
+
+## Comparing linkages
+
+The **cophenetic correlation** measures how faithfully a dendrogram keeps the original distances: the correlation
+between the distance of each pair of districts and the height at which the tree first joins them.
+
+```{r linkages}
+linkages <- c("single", "complete", "average", "ward.D2")
+hcs <- map(set_names(linkages), \(m) hclust(D, method = m))
+link_tab <- imap_dfr(hcs, function(h, m) {
+  cl <- cutree(h, k = 3)
+  tibble(linkage = m,
+         cophenetic_correlation = cor(cophenetic(h), D),
+         cluster_sizes_at_k3 = paste(sort(table(cl), decreasing = TRUE), collapse = " / "),
+         silhouette_k3 = mean_silhouette(cl, D))
+})
+save_tab(link_tab, "t03_linkages", dir = paths$tab_rq2) |> kable(digits = 3, caption = "Four linkages, cut at three clusters")
+```
+
+**Observation.** The linkage matters far more than the cophenetic correlation suggests.
+
+* **Single and average** linkage have the highest cophenetic correlations, but cut at three clusters they give
+  64/1/1 and 62/2/2: one huge cluster plus a few outlying districts split off on their own. They describe the tree
+  well but give a useless grouping. This is the "chaining" behaviour of single linkage.
+* **Complete** linkage is better, but still leaves a cluster of 2.
+* **Ward** gives three clusters of useful size (34/20/12). It is also the only linkage with the same goal as
+  k-means (small within-cluster spread), which makes the two methods directly comparable.
+
+We use Ward's method for the comparison with k-means.
+
+## The Ward dendrogram
+
+```{r dendrogram, fig.height = 6, out.width = "100%"}
+hc <- hcs[["ward.D2"]]
+draw_dendro <- function() {
+  par(mar = c(1, 4, 3, 1))
+  plot(hc, hang = -1, cex = 0.6, main = "Ward's hierarchical clustering of 66 districts",
+       sub = "", xlab = "", ylab = "Merge height (increase in within-cluster SS)")
+  rect.hclust(hc, k = 3, border = c("#2a6f97", "#e76f51", "#2a9d8f"))
+}
+png(file.path(paths$fig_rq2, "fig05_dendrogram.png"), width = 11, height = 6, units = "in", res = 200)
+draw_dendro(); invisible(dev.off())
+draw_dendro()
+```
+
+**Observation.** The tree's first split (the highest merge) separates the slow-building provincial
+districts (left) from all the rest. The second split separates the cities and dense urban districts (middle) from
+a large group of growing house-building districts (right). Inside the right-hand branch, a group of southern and
+western provincial districts (Southland, Timaru, Invercargill, Whanganui, South Taranaki) joins late. These
+districts sit between the provincial and growing groups, and k-means places some of them differently (below).
+
+The merge heights rise smoothly rather than jumping, so there is no height at which the tree "obviously" should be
+cut. This is the same weak structure the criteria showed.
+
+## Stability of Ward clusters
+
+```{r ward-stability, cache = TRUE}
+ward_criteria <- map_dfr(2:6, function(k) {
+  cl <- ward_labels(X, k)
+  tibble(k, silhouette = mean_silhouette(cl, D), ch = calinski_harabasz(X, cl),
+         stability = mean(boot_stability(X, \(x) ward_labels(x, k), B = 100)))
+})
+kable(ward_criteria, digits = 3, caption = "Ward's method: criteria by number of clusters")
+```
+
+**Observation.** Ward's clusters are noticeably **less stable** than k-means' (about
+`r round(ward_criteria$stability[ward_criteria$k == 3], 2)` vs `r round(criteria$stability[criteria$k == 3], 2)` at
+*k* = 3). This is a known weakness of hierarchical clustering: once two districts are merged, the merge is never
+undone, so a small change in the data early on changes everything above it. k-means can move a district between
+clusters at every step.
+
+# Do k-means and Ward agree?
+
+The **adjusted Rand index (ARI)** compares two clusterings of the same items. It counts the pairs of districts that
+both methods put together (or both keep apart), and corrects for the agreement expected by chance. ARI = 1 means
+identical groupings, even if the clusters are numbered differently; ARI = 0 means no more agreement than random
+labels.
+
+```{r compare}
+set.seed(462)
+km3 <- kmeans(X, centers = 3, nstart = 50, iter.max = 100)
+cl_km   <- relabel_by_size(km3$cluster)
+cl_ward <- relabel_by_size(cutree(hc, k = 3))
+
+table(`k-means` = cl_km, Ward = cl_ward)
+ari_km_ward <- adjusted_rand(cl_km, cl_ward)
+c(ARI = ari_km_ward)
+
+tibble(district = short, `k-means` = cl_km, Ward = cl_ward) |>
+  filter(`k-means` != Ward) |> kable(caption = "Districts the two methods place differently")
+```
+
+**Observation.** The two methods agree on most districts (ARI = `r round(ari_km_ward, 2)`). They differ on
+six districts: Invercargill, South Taranaki and Whanganui (provincial in k-means, house-building in Ward), Palmerston
+North (urban vs house-building), and Gisborne and Lower Hutt (urban vs provincial). These are the borderline
+districts: they sit between two clusters in the PCA plot, and both methods are partly right about them.
+
+**Decision.** We use the **k-means clustering with k = 3** as the final grouping. It is more stable under
+resampling than Ward's, has the higher silhouette, and k-means directly minimises the within-cluster spread we
+care about. Ward's tree is kept as a second view, which shows how the clusters split further.
+
+# The three building markets
+
+## Profiles
+
+```{r profile}
+final <- raw |> mutate(cluster = cl_km, name = short)
+
+profile_vars <- c(vars, "alt_share", "dwellings")
+profile <- final |>
+  group_by(cluster) |>
+  summarise(districts = n(), across(all_of(profile_vars), median), .groups = "drop")
+profile |>
+  mutate(across(c(apt_share, retire_share, town_share, nonres_share, alt_share), \(x) 100 * x),
+         rel_cost = 100 * (exp(rel_cost) - 1), growth = 100 * (exp(growth) - 1), volatility = 100 * volatility) |>
+  save_tab("t04_cluster_profiles", dir = paths$tab_rq2) |>
+  kable(digits = 1, caption = paste("Median of each feature by cluster, natural units.",
+                                    "Shares, cost, growth and volatility in %; dwellings = total over ten years"))
+```
+
+
+**Observation.** The three clusters differ in clear and interpretable ways:
+
+1. **House-building districts** (30 districts). The highest building intensity (median 7.5 new dwellings per
+   1,000 residents a year), the biggest houses (192 m²), almost all stand-alone houses plus retirement villages,
+   the least volatile building, a small non-residential share, and slightly cheaper than average (−4%). These are
+   commuter belts around the cities (Selwyn, Waimakariri, Waikato, Waipa), lifestyle and retirement areas
+   (Thames-Coromandel, Kāpiti Coast, Tasman, Central Otago), and growing rural service towns (Ashburton,
+   Marlborough).
+2. **Slow provincial districts** (21 districts). The lowest building intensity (3.1 per 1,000), almost no
+   townhouses, apartments or retirement units, the most volatile building, the largest non-residential share
+   (39%), the smallest houses (177 m²) and the cheapest construction (−8%). They are small (a median of under 500
+   new dwellings in ten years). Building did pick up in 2021–2026 (+21%), but from a low base.
+3. **Urban medium-density markets** (15 districts). A third of new dwellings are townhouses, flats or units, and
+   some are apartments (4.5%). Construction is the dearest (+5% vs other districts), and they are the largest
+   markets. Twelve of the 15 are city councils, plus Queenstown-Lakes, Gisborne and Hastings.
+
+```{r names}
+# names chosen from the profiles above (cluster 1 = largest)
+cluster_names <- c("House-building districts", "Slow provincial districts", "Urban medium-density")
+final <- final |> mutate(market = factor(cluster_names[cluster], levels = cluster_names))
+final |> group_by(market) |>
+  summarise(districts = n(), members = paste(sort(name), collapse = ", ")) |>
+  save_tab("t05_cluster_members", dir = paths$tab_rq2) |>
+  kable(caption = "Members of each cluster")
+```
+
+```{r centre-heatmap, fig.height = 3.6}
+centres <- as_tibble(X) |> mutate(cluster = cl_km) |>
+  group_by(cluster) |> summarise(across(everything(), mean)) |>
+  pivot_longer(-cluster, names_to = "feature", values_to = "z")
+p_centres <- ggplot(centres |> mutate(market = factor(cluster_names[cluster], levels = rev(cluster_names))),
+                    aes(feature, market, fill = z)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = sprintf("%+.1f", z)), size = 3) +
+  scale_fill_gradient2(low = "#2a6f97", mid = "white", high = "#e76f51", midpoint = 0, limits = c(-2, 2),
+                       oob = scales::squish) +
+  labs(title = "Cluster centres in standard deviations from the average district",
+       x = NULL, y = NULL, fill = "z") +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+save_fig(p_centres, "fig06_cluster_centres", dir = paths$fig_rq2, height = 3.6, width = 8)
+```
+
+## Where the clusters sit
+
+```{r pca-clusters, fig.height = 5.5}
+pca <- prcomp(X)
+pv <- pca$sdev^2 / sum(pca$sdev^2)
+pca_df <- as_tibble(pca$x[, 1:2]) |> mutate(name = short, market = final$market)
+market_cols <- set_names(c("#2a6f97", "#e76f51", "#2a9d8f"), cluster_names)
+
+p_pca <- ggplot(pca_df, aes(PC1, PC2, colour = market)) +
+  geom_hline(yintercept = 0, colour = "grey88") + geom_vline(xintercept = 0, colour = "grey88") +
+  stat_ellipse(level = 0.8, linetype = 2, show.legend = FALSE) +
+  geom_point(size = 2) +
+  geom_text(aes(label = name), size = 2.3, vjust = -0.8, check_overlap = TRUE, show.legend = FALSE) +
+  scale_colour_manual(values = market_cols) +
+  scale_x_continuous(expand = expansion(mult = 0.1)) +
+  labs(title = "The three building markets on the first two principal components",
+       subtitle = "Dashed ellipses contain about 80% of each cluster",
+       x = sprintf("PC1 (%.0f%%): building intensity, bigger houses  →", 100 * pv[1]),
+       y = sprintf("PC2 (%.0f%%): denser and dearer  →", 100 * pv[2]), colour = NULL) +
+  theme(legend.position = "top")
+save_fig(p_pca, "fig07_clusters_pca", dir = paths$fig_rq2, height = 5.5, width = 8)
+```
+
+## How well does each district fit?
+
+```{r silhouette-plot, fig.height = 6}
+sil <- silhouette(cl_km, D)
+sil_df <- tibble(name = short, market = final$market, width = sil[, "sil_width"],
+                 neighbour = cluster_names[sil[, "neighbor"]]) |>
+  arrange(market, width) |>
+  mutate(name = factor(name, levels = name))
+p_sil <- ggplot(sil_df, aes(width, name, fill = market)) +
+  geom_col() +
+  geom_vline(xintercept = 0, colour = "grey40") +
+  scale_fill_manual(values = market_cols) +
+  labs(title = "Silhouette width of each district",
+       subtitle = "Near 1: clearly in its cluster. Near 0: on the border. Negative: closer to another cluster.",
+       x = "Silhouette width", y = NULL, fill = NULL) +
+  theme(axis.text.y = element_text(size = 6), legend.position = "top")
+save_fig(p_sil, "fig08_silhouette", dir = paths$fig_rq2, height = 6, width = 7)
+
+sil_df |> group_by(market) |> summarise(mean_width = mean(width), negative = sum(width < 0)) |> kable(digits = 3)
+sil_df |> filter(width < 0) |> select(name, market, width, neighbour) |> kable(digits = 3,
+  caption = "Districts closer, on average, to another cluster")
+```
+
+**Observation.** The house-building cluster is the most coherent (mean silhouette about 0.28), and no district in
+it is closer to another cluster. The urban cluster is the loosest (about 0.09). Four of its members have negative
+widths: Palmerston North, Tauranga and Hastings are, on average, closer to the house-building districts, and
+Gisborne is closer to the provincial ones. The urban cluster is held together mainly by its townhouse and apartment
+shares. Apart from that, its members are quite different from each other (compare Wellington and Queenstown).
+
+# Which features separate the clusters? (ANOVA)
+
+**One-way analysis of variance (ANOVA)** tests whether the mean of a variable differs between groups. It splits the
+variation of the feature into a part *between* clusters and a part *within* clusters:
+
+$$F = \frac{\text{between-cluster variance} / (k-1)}{\text{within-cluster variance} / (n-k)}$$
+
+A large *F* means the cluster means are far apart compared with the spread inside each cluster. We also report
+**η² (eta squared)**, the share of the feature's variance explained by the clusters (between SS ÷ total SS), which
+is easier to compare across features than *F*.
+
+**Caution.** The clusters were *made* to differ on these features, so the p-values are not honest tests: they will
+be small even for random data. We use *F* and η² only to **rank** the features by how much they separate the
+clusters.
+
+```{r anova}
+tf <- rq2$transformed
+anova_tab <- map_dfr(vars, function(v) {
+  fit <- aov(tf[[v]] ~ factor(cl_km))
+  s <- summary(fit)[[1]]
+  tibble(feature = v, F = s[1, "F value"], p_value = s[1, "Pr(>F)"],
+         eta_squared = s[1, "Sum Sq"] / sum(s[, "Sum Sq"]))
+}) |> arrange(desc(eta_squared))
+save_tab(anova_tab, "t06_anova", dir = paths$tab_rq2) |>
+  kable(digits = 3, caption = "One-way ANOVA of each (transformed) feature on the three clusters")
+```
+
+**Observation.** Townhouse share, apartment share, building intensity and non-residential share separate the
+clusters most: each has η² of about 0.44–0.54, so the clusters explain about half of their variation. Cost,
+volatility, retirement share and house size come next (η² 0.23–0.30). Growth separates the clusters least (η² ≈ 0.15),
+so districts that are growing fast are found in all three markets. All p-values are tiny, but as noted, that is
+guaranteed by how clusters are formed and is not evidence on its own.
+
+# How robust are the clusters?
+
+## Leaving out one feature at a time
+
+If the clusters reflect real differences, removing a single feature should not change them much. We re-run
+k-means (k = 3) nine times, each time without one feature, and compare with the final clustering (ARI).
+
+```{r leave-one-out, cache = TRUE}
+loo <- map_dfr(vars, function(v) {
+  set.seed(462)
+  cl <- kmeans(X[, setdiff(vars, v)], centers = 3, nstart = 50, iter.max = 100)$cluster
+  tibble(left_out = v, ARI_with_final = adjusted_rand(cl_km, cl))
+}) |> arrange(ARI_with_final)
+save_tab(loo, "t07_leave_one_feature_out", dir = paths$tab_rq2) |>
+  kable(digits = 3, caption = "Agreement with the final clusters when one feature is left out")
+```
+
+**Observation.** For seven of the nine features, leaving it out barely changes the clusters (ARI 0.86 to 1). Two
+features carry more weight. Without the **non-residential share** the agreement drops to 0.55, and without
+**house size** to 0.79. These two separate the provincial districts (more commercial building, smaller houses) from
+the house-building ones. Leaving out **volatility**, which Step 1 showed is partly a small-district effect, changes
+little (ARI 0.86). So the clusters are not an artefact of the size bias in that feature.
+
+## A finer split: four clusters
+
+```{r k4}
+set.seed(462)
+cl_k4 <- relabel_by_size(kmeans(X, centers = 4, nstart = 50, iter.max = 100)$cluster)
+table(`k = 3` = final$market, `k = 4` = cl_k4)
+final |> mutate(k4 = cl_k4) |> group_by(k4) |>
+  summarise(districts = n(), members = paste(sort(name), collapse = ", ")) |> kable()
+```
+
+**Observation.** With four clusters, the urban and house-building groups stay almost unchanged. The **slow
+provincial** cluster splits in two:
+
+* southern and central provincial districts (Clutha, Gore, Invercargill, Tararua, South Waikato and others),
+  joined by Ashburton, Southland and Timaru from the house-building group. These are steady farming-service
+  economies;
+* a group of small, volatile districts, mostly in the central and eastern North Island and on the West Coast
+  (Kawerau, Ōpōtiki, Wairoa, Waitomo, Ruapehu, Whakatane, Gisborne, Rotorua, Buller, Westland). These have the
+  most volatile building and the smallest houses.
+
+Upper Hutt also joins this second group, which makes no geographic or economic sense. It is a sign that the
+four-cluster solution is less reliable (lower stability, above). The split is a useful finer description but we keep
+three clusters as the main result.
+
+# Clusters, geography and cost
+
+```{r geography}
+table(final$market, final$island)
+final |> group_by(market) |>
+  summarise(cities = sum(is_city), median_dwellings = median(dwellings),
+            median_rel_cost_pct = 100 * (exp(median(rel_cost)) - 1),
+            regions = n_distinct(region)) |>
+  kable(digits = 1)
+```
+
+**Observation.** Every cluster contains districts from both islands and from 9–12 of the 16 regions. The markets
+are **not** just geography. A Canterbury commuter district (Selwyn) has more in common with a Waikato one (Waipa)
+than with Christchurch, its neighbour. Construction cost differs between clusters (urban +5%, house-building
+−4%, provincial −8% relative to other districts). This agrees with RQ1, where denser, busier markets were dearer.
+
+# Answer to RQ2
+
+**Question.** What kinds of building markets does New Zealand have?
+
+**Answer.** Grouping the 66 districts on nine features of their building over 2016–2026 gives three kinds of
+market:
+
+| Market | Districts | What characterises it | Examples |
+|---|---|---|---|
+| House-building districts | 30 | Most new dwellings per resident, large stand-alone houses and retirement villages, steady building, slightly cheap | Selwyn, Waimakariri, Waipa, Tasman, Kāpiti Coast, Thames-Coromandel |
+| Slow provincial districts | 21 | Little building for their population, volatile, more commercial building, small houses, cheapest | Gore, Clutha, Wairoa, Ōpōtiki, Grey, South Waikato |
+| Urban medium-density markets | 15 | Many townhouses and some apartments, largest markets, dearest | Auckland, Wellington, Christchurch, Hamilton, Queenstown-Lakes |
+
+**How sure are we?**
+
+* k-means and Ward's hierarchical clustering agree on 60 of the 66 districts (ARI 0.75), and k-means reproduces the
+  same clusters in resampled data (stability about 0.85).
+* But the separation is **weak** (mean silhouette about 0.2), and the gap statistic finds no evidence of clusters
+  beyond a continuum. The three markets are a useful summary of a continuous range, not sharply separate types.
+  Districts near the borders (Palmerston North, Tauranga, Hastings, Gisborne, Invercargill) could reasonably be
+  placed in either neighbouring cluster.
+* The clusters are driven mostly by dwelling type (townhouse and apartment shares), building intensity and the
+  share of non-residential building, and they are not just geographic.
+
+**Limitations.** The result depends on the choice of features and on the ten-year window. Volatility is partly a
+small-district effect, although leaving it out changes little. With 66 districts, small changes in the data can
+move border districts between clusters.
+
+# Save
+
+```{r save}
+dir.create(paths$models_rq2, showWarnings = FALSE, recursive = TRUE)
+membership <- final |> select(ta, name, region, island, market, cluster) |>
+  mutate(silhouette = sil[, "sil_width"], ward_cluster = cl_ward, k4_cluster = cl_k4)
+write_csv(membership, file.path(paths$tab_rq2, "t08_district_membership.csv"))
+saveRDS(list(kmeans = km3, hclust_ward = hc, membership = membership, centres_z = km3$centers,
+             scaling = list(center = attr(X, "scaled:center"), scale = attr(X, "scaled:scale")),
+             vars = vars, cluster_names = cluster_names),
+        file.path(paths$models_rq2, "rq2_clusters.rds"))
+list.files(paths$models_rq2)
+```
+
+# Appendix: helper functions
+
+This notebook uses helper functions from `R/utils_data.R` and `R/utils_cluster.R`, printed here so the document is
+complete on its own.
+
+```{r appendix-utils-data, code = readLines(file.path(proj_root, "R", "utils_data.R")), eval = FALSE}
+```
+
+```{r appendix-utils-cluster, code = readLines(file.path(proj_root, "R", "utils_cluster.R")), eval = FALSE}
+```
+
+```{r session, include = FALSE}
+sessionInfo()
+```

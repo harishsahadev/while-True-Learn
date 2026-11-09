@@ -1,0 +1,67 @@
+ta,name,region,island,market,cluster,silhouette,ward_cluster,k4_cluster
+Ashburton District,Ashburton,Canterbury Region,South,House-building districts,1,0.13471829048432338,1,2
+Auckland,Auckland,Auckland Region,North,Urban medium-density,3,0.18466306129869695,3,3
+Buller District,Buller,West Coast Region,South,Slow provincial districts,2,0.20396217105919007,2,4
+Carterton District,Carterton,Wellington Region,North,House-building districts,1,0.247498806961615,1,1
+Central Hawke's Bay District,Central Hawke's Bay,Hawke's Bay Region,North,House-building districts,1,0.16609591091190956,1,1
+Central Otago District,Central Otago,Otago Region,South,House-building districts,1,0.2851931393434814,1,1
+Christchurch City,Christchurch,Canterbury Region,South,Urban medium-density,3,0.21201116417612756,3,3
+Clutha District,Clutha,Otago Region,South,Slow provincial districts,2,0.08392209019899437,2,2
+Dunedin City,Dunedin,Otago Region,South,Urban medium-density,3,0.18559236382862307,3,3
+Far North District,Far North,Northland Region,North,House-building districts,1,0.3173331870381059,1,1
+Gisborne District,Gisborne,Gisborne Region,North,Urban medium-density,3,-0.011033621644999476,2,4
+Gore District,Gore,Southland Region,South,Slow provincial districts,2,0.08880638045006976,2,2
+Grey District,Grey,West Coast Region,South,Slow provincial districts,2,0.31880708740913516,2,2
+Hamilton City,Hamilton,Waikato Region,North,Urban medium-density,3,0.16606102953667617,3,3
+Hastings District,Hastings,Hawke's Bay Region,North,Urban medium-density,3,-0.026196431017354648,3,3
+Hauraki District,Hauraki,Waikato Region,North,House-building districts,1,0.22517876875160622,1,1
+Horowhenua District,Horowhenua,Manawatu-Whanganui Region,North,House-building districts,1,0.24281267690669342,1,1
+Hurunui District,Hurunui,Canterbury Region,South,House-building districts,1,0.2855639262131349,1,1
+Invercargill City,Invercargill,Southland Region,South,Slow provincial districts,2,0.15783927501075645,1,2
+Kaikoura District,Kaikoura,Canterbury Region,South,House-building districts,1,0.2815190844976273,1,1
+Kaipara District,Kaipara,Northland Region,North,House-building districts,1,0.4125760282004701,1,1
+Kapiti Coast District,Kapiti Coast,Wellington Region,North,House-building districts,1,0.10860562870354899,1,1
+Kawerau District,Kawerau,Bay of Plenty Region,North,Slow provincial districts,2,0.15239803039388708,2,4
+Lower Hutt City,Lower Hutt,Wellington Region,North,Urban medium-density,3,0.24798650496619082,2,3
+Mackenzie District,Mackenzie,Canterbury Region,South,House-building districts,1,0.2370511925828867,1,1
+Manawatu District,Manawatu,Manawatu-Whanganui Region,North,House-building districts,1,0.3301526609497766,1,1
+Marlborough District,Marlborough,Marlborough Region,South,House-building districts,1,0.32225671154356345,1,1
+Masterton District,Masterton,Wellington Region,North,House-building districts,1,0.29425881157200606,1,1
+Matamata-Piako District,Matamata-Piako,Waikato Region,North,House-building districts,1,0.3538565959054394,1,1
+Napier City,Napier,Hawke's Bay Region,North,Urban medium-density,3,0.09836618577520582,3,3
+Nelson City,Nelson,Nelson Region,South,Urban medium-density,3,7.786094608851133e-4,3,3
+New Plymouth District,New Plymouth,Taranaki Region,North,House-building districts,1,0.26880962650346935,1,1
+Opotiki District,Opotiki,Bay of Plenty Region,North,Slow provincial districts,2,0.3175881123160751,2,4
+Otorohanga District,Otorohanga,Waikato Region,North,Slow provincial districts,2,0.13271957718492855,2,2
+Palmerston North City,Palmerston North,Manawatu-Whanganui Region,North,Urban medium-density,3,-0.08417440560568604,1,3
+Porirua City,Porirua,Wellington Region,North,Urban medium-density,3,0.05288303884627965,3,3
+Queenstown-Lakes District,Queenstown-Lakes,Otago Region,South,Urban medium-density,3,0.06361930365639092,3,3
+Rangitikei District,Rangitikei,Manawatu-Whanganui Region,North,Slow provincial districts,2,0.2797323964468471,2,2
+Rotorua District,Rotorua,Bay of Plenty Region,North,Slow provincial districts,2,0.04567904114261021,2,4
+Ruapehu District,Ruapehu,Manawatu-Whanganui Region,North,Slow provincial districts,2,0.19338880007569556,2,4
+Selwyn District,Selwyn,Canterbury Region,South,House-building districts,1,0.3048024791355737,1,1
+South Taranaki District,South Taranaki,Taranaki Region,North,Slow provincial districts,2,0.0838462677358856,1,2
+South Waikato District,South Waikato,Waikato Region,North,Slow provincial districts,2,0.27687870318396995,2,2
+South Wairarapa District,South Wairarapa,Wellington Region,North,House-building districts,1,0.3451264927520559,1,1
+Southland District,Southland,Southland Region,South,House-building districts,1,0.1623329323669303,1,2
+Stratford District,Stratford,Taranaki Region,North,Slow provincial districts,2,0.15985029122677483,2,2
+Tararua District,Tararua,Manawatu-Whanganui Region,North,Slow provincial districts,2,0.2909178213687104,2,2
+Tasman District,Tasman,Tasman Region,South,House-building districts,1,0.42768382298698204,1,1
+Taupo District,Taupo,Waikato Region,North,House-building districts,1,0.28523516075069355,1,1
+Tauranga City,Tauranga,Bay of Plenty Region,North,Urban medium-density,3,-0.0465208156294473,3,3
+Thames-Coromandel District,Thames-Coromandel,Waikato Region,North,House-building districts,1,0.2746297112337521,1,1
+Timaru District,Timaru,Canterbury Region,South,House-building districts,1,0.10453135806119138,1,2
+Upper Hutt City,Upper Hutt,Wellington Region,North,Urban medium-density,3,0.0706283572739371,3,4
+Waikato District,Waikato,Waikato Region,North,House-building districts,1,0.43468212549513285,1,1
+Waimakariri District,Waimakariri,Canterbury Region,South,House-building districts,1,0.34197940968374807,1,1
+Waimate District,Waimate,Canterbury Region,South,Slow provincial districts,2,0.17096645702390523,2,2
+Waipa District,Waipa,Waikato Region,North,House-building districts,1,0.3065946250881368,1,1
+Wairoa District,Wairoa,Hawke's Bay Region,North,Slow provincial districts,2,0.2635899846862704,2,4
+Waitaki District,Waitaki,Otago Region,South,House-building districts,1,0.3499652200280286,1,1
+Waitomo District,Waitomo,Waikato Region,North,Slow provincial districts,2,0.24603154192238275,2,4
+Wellington City,Wellington,Wellington Region,North,Urban medium-density,3,0.2266072140594973,3,3
+Western Bay of Plenty District,Western Bay of Plenty,Bay of Plenty Region,North,House-building districts,1,0.3600571662254972,1,1
+Westland District,Westland,West Coast Region,South,Slow provincial districts,2,0.1681132643420106,2,4
+Whakatane District,Whakatane,Bay of Plenty Region,North,Slow provincial districts,2,0.18941320773207215,2,4
+Whanganui District,Whanganui,Manawatu-Whanganui Region,North,Slow provincial districts,2,0.05612693321585892,1,2
+Whangarei District,Whangarei,Northland Region,North,House-building districts,1,0.30946770662287776,1,1
