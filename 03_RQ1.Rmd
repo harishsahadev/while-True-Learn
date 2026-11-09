@@ -1,0 +1,1686 @@
+---
+title: "RQ1: What drives the real cost per m² of new houses across districts?"
+subtitle: "Building consents (Stats NZ, Aug 2026) — linear regression, ridge and lasso, tree-based models"
+author: "Andrew Boulton — while True: learn(), Group 8, STAT462"
+output:
+  html_document:
+    toc: yes
+    number_sections: yes
+    toc_float: yes
+---
+
+```{=html}
+<style>
+.boxNote { background-color: lightblue; color: black; border: 2px solid black;
+           margin: 5px; padding: 5px; font-style: italic; }
+</style>
+```
+
+```{r setup, include = FALSE}
+Sys.setenv(LANG = "en")
+knitr::opts_chunk$set(message = FALSE,
+                      warning = FALSE,
+                      fig.align = 'center',
+                      out.width = '75%')
+library(tidyverse)
+library(MASS)          # lm.ridge(), and loaded so dplyr::select is always written with its namespace
+library(GGally)        # ggpairs()
+library(gridExtra)     # grid.arrange()
+library(leaps)         # regsubsets()  (section 3)
+library(glmnet)        # ridge and lasso  (section 4) - the one package outside the course labs, see 1.1
+library(tree)          # regression tree  (section 5)
+library(randomForest)  # random forest    (section 5)
+library(gbm)           # boosting         (section 5)
+set.seed(462)
+
+# where the data lives: one line to change per machine
+data_root <- Sys.getenv("STAT462_RQ1_DATA", unset = "data")
+```
+
+This document answers research question 1 of our project: *what drives the
+real cost per square metre of new houses across New Zealand's districts?* It
+starts from the model-ready table built by Niwesh (`rq1_model_data.csv`,
+Step 1 of his pipeline), builds the modelling table we use for every model,
+looks at the data before fitting anything, and then fits the models in the
+order the course teaches them: simple and multiple linear regression (Modules
+1–2), ridge and lasso (ISLR2 §6.5), a regression tree, a random forest and a
+boosted model (Module 6). Every model is judged on the same time-ordered test
+set (2020Q1–2026Q2) by test MSE and $R^2$, and the document ends with a
+comparison against the numbers in Niwesh's own notebooks, so the group has
+two independent builds of the same question.
+
+# Set up
+
+## Data
+
+The table has one row per district and quarter. Niwesh's Step 1 notebook
+(`01_rq1_data_preparation.Rmd`, branch `niwesh`) builds it from the Stats NZ
+*Building consents by territorial authority (Monthly)* file: months are summed
+to quarters, the consented value of new houses is divided by their floor area
+to give nominal $/m², GST of the day is removed, the value is deflated to
+June-2026 dollars with the CGPI dwelling-units index (`CEPQ.S611011A`) and 15%
+GST is put back. Rows with fewer than five new houses in the quarter were
+dropped before the file was written, so every row we read is a usable one.
+
+```{r}
+rq1_raw <- read_csv(file.path(data_root, "rq1_model_data.csv"),
+                    show_col_types = FALSE) %>%
+  mutate(across(c(ta, region, island, split), as.factor),
+         quarter = factor(quarter, levels = 1:4),
+         is_city = as.logical(is_city),
+         in_model = as.logical(in_model))
+
+cat("Rows:", nrow(rq1_raw), " Columns:", ncol(rq1_raw),
+    " Districts:", n_distinct(rq1_raw$ta),
+    " Quarters:", min(rq1_raw$yq), "to", max(rq1_raw$yq), "\n")
+glimpse(rq1_raw)
+```
+
+8,662 district-quarters, 67 districts, 1990Q2 to 2026Q2, 43 columns. The data
+dictionary that travels with the file:
+
+```{r}
+read_csv(file.path(data_root, "rq1_data_dictionary.csv"),
+         show_col_types = FALSE) %>%
+  knitr::kable(caption = "Data dictionary for rq1_model_data.csv (Niwesh, Step 1)")
+```
+
+## The modelling table
+
+Not every column is a legitimate predictor. We keep two responses, the
+drivers, and the two geography columns, and drop the rest. The rule for what
+is a driver: it must be known in the same quarter from *counts* (how many of
+what was consented) or from the past, never from the dollar value of the
+houses themselves — otherwise the model is told the answer.
+
+```{r}
+# the two responses: relative cost (headline) and real $/m2 (secondary, section 6)
+responses <- c("rel_log_cost_m2", "log_real_cost_m2")
+
+# the drivers: same-quarter counts and shares, population pressure, and the time index
+drivers <- c("t_index",             # quarter number, 1990Q1 = 1
+             "avg_house_m2",        # average floor area of a new house
+             "rel_house_m2",        # house size relative to the rest of NZ, same quarter
+             "log_houses_n",        # log number of new houses
+             "multiunit_share",     # share of new dwellings that are not stand-alone houses
+             "apt_share",           # share that are apartments
+             "retire_share",        # share that are retirement-village units
+             "dwell_per_1000",      # new dwellings per 1,000 residents, year to quarter end
+             "houses_yoy",          # log growth in houses vs the same quarter last year
+             "log_resid_alt_real",  # log real $ of residential alterations
+             "log_nonres_real")     # log real $ of new non-residential work
+
+df <- rq1_raw %>%
+  dplyr::select(ta, region, year, quarter, yq, split, houses_n,
+                all_of(responses), all_of(drivers))
+
+dim(df)
+```
+
+::: {.boxNote}
+**What was left out, and why.** `nominal_cost_m2`, `houses_val`,
+`real_cost_m2`, `loo_cost_m2` and `real_factor` are the response or its
+ingredients (leakage). `real_cost_m2_lag1` / `_lag4` are the response one and
+four quarters earlier — a persistence benchmark, not a driver of cost, so they
+are kept out of the explanatory models. `houses_m2`, `dwell_n`, `apt_n`,
+`retire_n`, `town_n`, `resid_new_val`, `resid_alt_val`, `nonres_new_val` are
+the raw counts and dollars that the shares and logs above are built from, and
+would duplicate them. `island`, `is_city` and `quarter` (season) explained
+under 0.5% of the variance in Niwesh's EDA and are dropped as features;
+`quarter` and `year` stay in the table for grouping only.
+
+**Rows: our frame vs Niwesh's.** Niwesh fits his models on 1996Q1 onward and
+drops Chatham Islands and Kawerau (5,694 train / 1,608 test, 65 districts). We
+keep the full 1990Q2+ frame and all 67 districts as agreed on 6 Nov
+(7,051 / 1,611). The practical difference is small — Chatham Islands has 2
+rows and Kawerau 3 — but two drivers are not available before 1996:
+`dwell_per_1000` (the per-1,000-residents series starts in 1996) is `NA` for
+all 1,355 pre-1996 rows, and `houses_yoy` is `NA` for the first year of each
+district (238 rows). Any model that uses them is therefore fitted on the rows
+where they exist; the table below shows how many that is. Where we compare
+against Niwesh's numbers in section 6 we say which frame each number comes
+from.
+:::
+
+```{r}
+# how many rows survive once the drivers that start in 1996 are required
+df_complete <- df %>% drop_na(all_of(drivers))
+
+bind_rows(
+  df          %>% count(split, name = "all rows"),
+  df_complete %>% count(split, name = "rows with every driver")
+) %>%
+  group_by(split) %>%
+  summarise(across(everything(), ~ sum(.x, na.rm = TRUE))) %>%
+  knitr::kable(caption = "Rows available per split")
+```
+
+## Train and test sets
+
+The split is by time, not at random: the labs' `sample()` split would let
+2024 rows teach the model about 2023, which is not the question a forecaster
+faces. Niwesh's file carries the split already (`split == "train"` up to
+2019Q4, `"test"` from 2020Q1), and we use it as given so both builds are
+judged on exactly the same quarters.
+
+```{r}
+df_train <- df %>% dplyr::filter(split == "train")
+df_test  <- df %>% dplyr::filter(split == "test")
+
+cat("Training set size:", nrow(df_train), " (", min(df_train$yq), "to", max(df_train$yq), ")\n")
+cat("Test set size:    ", nrow(df_test),  " (", min(df_test$yq),  "to", max(df_test$yq),  ")\n")
+cat("Districts in train:", n_distinct(df_train$ta), " in test:", n_distinct(df_test$ta), "\n")
+```
+
+7,051 training and 1,611 test rows, all 67 districts in both. The test years
+include COVID and the 2021–23 cost spike, so this is a hard test on purpose.
+
+# First impression
+
+Before fitting anything: what does the response look like, which districts
+sit where, and how do the drivers relate to it and to each other.
+
+## The two responses
+
+```{r}
+p1 <- ggplot(df_train, aes(x = log_real_cost_m2)) +
+  geom_histogram(bins = 50, fill = "steelblue", colour = "white") +
+  labs(title = "Log real $/m2 (training rows)",
+       x = "log(real $/m2, June-2026 dollars)", y = "District-quarters")
+
+p2 <- ggplot(df_train, aes(x = rel_log_cost_m2)) +
+  geom_histogram(bins = 50, fill = "darkorange", colour = "white") +
+  labs(title = "Relative cost (training rows)",
+       x = "log(district $/m2) - log(rest-of-NZ $/m2)", y = "District-quarters")
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+Both are close to symmetric on the log scale, which is what the log was for.
+The relative response is centred just below zero (the median district is
+slightly cheaper than the country as a whole, because the national figure is
+pulled up by Auckland) and most rows sit within ±0.3, i.e. within about 30%
+of the rest of the country.
+
+```{r}
+df_train %>%
+  group_by(year) %>%
+  summarise(real = median(exp(log_real_cost_m2)),
+            relative = median(rel_log_cost_m2)) %>%
+  pivot_longer(-year, names_to = "response", values_to = "median") %>%
+  ggplot(aes(x = year, y = median)) +
+  geom_line() + geom_point(size = 1) +
+  facet_wrap(~ response, scales = "free_y", ncol = 1,
+             labeller = as_labeller(c(real = "Median real $/m2 by year",
+                                      relative = "Median relative cost by year"))) +
+  labs(title = "Why the relative response exists", x = "Year", y = NULL)
+```
+
+The real $/m² series rises through the whole training period; the relative
+series is flat by construction. A tree-based model cannot extrapolate a trend
+past the last training year, and a linear trend in `t_index` would be asked to
+hold through 2020–26 — the relative response removes the problem rather than
+hoping a model copes with it. Section 6 fits the real response as well, to
+show the size of the gap.
+
+## Districts
+
+```{r, out.width = '90%', fig.height = 7}
+district_order <- df_train %>%
+  group_by(ta) %>%
+  summarise(med = median(rel_log_cost_m2)) %>%
+  arrange(med) %>% pull(ta)
+
+df_train %>%
+  mutate(ta = factor(ta, levels = district_order)) %>%
+  ggplot(aes(x = ta, y = rel_log_cost_m2, fill = region)) +
+  geom_boxplot(outlier.size = 0.4) +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Relative cost by district, 1990-2019",
+       x = NULL, y = "log(district $/m2) - log(rest-of-NZ $/m2)") +
+  theme(legend.position = "bottom", legend.text = element_text(size = 7),
+        axis.text.y = element_text(size = 6))
+```
+
+```{r}
+df_train %>%
+  group_by(ta, region) %>%
+  summarise(median_ratio = exp(median(rel_log_cost_m2)),
+            IQR = IQR(rel_log_cost_m2), rows = n(), .groups = "drop") %>%
+  arrange(desc(median_ratio)) %>%
+  slice(c(1:6, (n() - 5):n())) %>%
+  mutate(across(c(median_ratio, IQR), ~ round(.x, 2))) %>%
+  knitr::kable(caption = "Six dearest and six cheapest districts (median ratio to the rest of NZ, training years)")
+```
+
+The ordering is stable enough to matter: the same districts stay at the top
+and bottom for thirty years. That is the first clue that *where* explains a
+lot, and it is why a district fixed effect is the ceiling we compare the
+drivers against in section 3.
+
+## How much is location, how much is time?
+
+Three one-way fits with nothing but group means — the same idea as the labs'
+"predict the average" baseline, applied to each grouping in turn.
+
+$$R^2 = 1 - \frac{RSS}{TSS}, \qquad RSS = \Sigma_{i=1}^{n}(y_i - \bar y_{g(i)})^2$$
+
+```{r}
+r2_group <- function(y, g) {
+  tss <- sum((y - mean(y))^2)
+  rss <- sum((y - ave(y, g, FUN = mean))^2)
+  1 - rss / tss
+}
+
+tibble(grouping = c("District", "Region", "Year", "Quarter (season)", "District + year"),
+       `relative cost` = c(r2_group(df_train$rel_log_cost_m2, df_train$ta),
+                           r2_group(df_train$rel_log_cost_m2, df_train$region),
+                           r2_group(df_train$rel_log_cost_m2, df_train$year),
+                           r2_group(df_train$rel_log_cost_m2, df_train$quarter),
+                           r2_group(df_train$rel_log_cost_m2, interaction(df_train$ta, df_train$year))),
+       `log real $/m2` = c(r2_group(df_train$log_real_cost_m2, df_train$ta),
+                           r2_group(df_train$log_real_cost_m2, df_train$region),
+                           r2_group(df_train$log_real_cost_m2, df_train$year),
+                           r2_group(df_train$log_real_cost_m2, df_train$quarter),
+                           r2_group(df_train$log_real_cost_m2, interaction(df_train$ta, df_train$year)))) %>%
+  mutate(across(-grouping, ~ round(.x, 3))) %>%
+  knitr::kable(caption = "Share of training variance explained by group means alone")
+```
+
+On the relative response the district alone explains about a third of the
+variance and the year almost none — time has been taken out. On the real
+response it is the other way round: the year explains about 40% and the
+district under 20%. Season explains nothing on either, which is why `quarter`
+is not a feature. Whatever the drivers achieve in the next sections has to be
+read against the district-only number: a model of measured drivers that
+reaches it has explained *why* the dear districts are dear.
+
+## The drivers
+
+```{r, out.width = '100%', fig.height = 9}
+set.seed(462)
+df_train %>%
+  drop_na(all_of(drivers)) %>%
+  slice_sample(n = 1500) %>%
+  dplyr::select(rel_log_cost_m2, all_of(drivers)) %>%
+  ggpairs(lower = list(continuous = wrap("points", alpha = 0.2, size = 0.4)),
+          upper = list(continuous = wrap("cor", size = 2.5)),
+          progress = FALSE) +
+  theme_grey(base_size = 6)
+```
+
+```{r}
+cor_long <- df_train %>%
+  drop_na(all_of(drivers)) %>%
+  dplyr::select(all_of(drivers)) %>%
+  cor() %>%
+  as.data.frame() %>%
+  rownames_to_column("x") %>%
+  pivot_longer(-x, names_to = "y", values_to = "r")
+
+ggplot(cor_long, aes(x = x, y = y, fill = r)) +
+  geom_tile() +
+  geom_text(aes(label = sprintf("%.2f", r)), size = 2.2) +
+  scale_fill_gradient2(low = "steelblue", mid = "white", high = "darkorange", limits = c(-1, 1)) +
+  labs(title = "Correlation between the drivers (training rows with every driver)", x = NULL, y = NULL) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# the pairs that will matter for ridge vs lasso
+cor_long %>%
+  dplyr::filter(x < y, abs(r) > 0.6) %>%
+  arrange(desc(abs(r))) %>%
+  mutate(r = round(r, 2)) %>%
+  knitr::kable(caption = "Driver pairs with |r| > 0.6")
+```
+
+Two pairs are strongly related: `avg_house_m2` with `rel_house_m2`
+($r \approx 0.9$; the second is the first measured against the rest of the
+country, so they move together within a quarter) and `log_houses_n` with
+`log_resid_alt_real` ($r \approx 0.8$; big districts build more and renovate
+more). `log_nonres_real` sits at about 0.7 with both of the size measures for
+the same reason. Ordinary least squares will split the credit
+between the members of each pair arbitrarily and give wide standard errors;
+this is exactly the situation ridge and lasso are for, and section 4 shows
+them handling it differently.
+
+```{r}
+df_train %>%
+  group_by(ta) %>%
+  summarise(across(c(rel_log_cost_m2, log_resid_alt_real, dwell_per_1000, avg_house_m2),
+                   ~ mean(.x, na.rm = TRUE))) %>%
+  pivot_longer(-c(ta, rel_log_cost_m2), names_to = "driver", values_to = "value") %>%
+  ggplot(aes(x = value, y = rel_log_cost_m2)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, colour = "darkorange") +
+  facet_wrap(~ driver, scales = "free_x") +
+  labs(title = "District averages, 1990-2019: three drivers against relative cost",
+       x = "District mean of the driver", y = "District mean relative cost")
+```
+
+At the district level the picture is already readable: districts with more
+alteration spending and bigger houses are dearer per m²; the population
+pressure measure is positive but noisier. These are between-district
+relationships. The models in the next sections are fitted on district-quarters,
+so they also see how a district's cost moves when its own alterations or
+growth change from one quarter to the next.
+
+*Which model does best with these drivers — and does any of them reach the
+district-only ceiling?*
+
+# Linear regression
+
+## The rows every model is fitted on
+
+Two drivers do not exist for the early years: `dwell_per_1000` starts in 1996
+and `houses_yoy` needs the same quarter a year earlier. `lm()` would drop the
+affected rows silently and `glmnet()` refuses missing values altogether, so we
+do it once, in the open, and every model from here on is fitted and tested on
+the same rows.
+
+```{r}
+df_train_c <- df_train %>% drop_na(all_of(drivers))
+df_test_c  <- df_test  %>% drop_na(all_of(drivers))
+
+cat("Training rows with every driver:", nrow(df_train_c),
+    " (", min(df_train_c$yq), "to", max(df_train_c$yq), ")\n")
+cat("Test rows with every driver:    ", nrow(df_test_c),
+    " (", min(df_test_c$yq),  "to", max(df_test_c$yq),  ")\n")
+
+# the drivers-only frames the models see (no identifiers, one response)
+train_drv <- df_train_c %>% dplyr::select(rel_log_cost_m2, all_of(drivers))
+test_drv  <- df_test_c  %>% dplyr::select(rel_log_cost_m2, all_of(drivers))
+```
+
+::: {.boxNote}
+**Headline frame: 5,696 training and 1,611 test district-quarters.** That is
+every row from 1996Q1 onward, all 67 districts (the `houses_yoy` gaps are all
+in 1990–91, inside the rows the 1996 cut already removes). It is Niwesh's modelling frame plus
+one Chatham Islands row and one Kawerau row, so the two builds are directly
+comparable. The cost of keeping the two drivers is the 1,355 rows from
+1990–1995; section 6 fits the headline linear model without those two drivers
+on all 7,051 rows as a sensitivity check, so the reader can see what the early
+years would have added.
+:::
+
+Two helpers used throughout: the test-set metrics the labs compute by hand,
+wrapped so every model reports them the same way, and a running results table.
+
+$$MSE = \frac{1}{n}\Sigma_{i=1}^{n}(y_i - \hat y_i)^2, \qquad
+  R^2_{test} = 1 - \frac{\Sigma(y_i - \hat y_i)^2}{\Sigma(y_i - \bar y_{train})^2}$$
+
+```{r}
+y_train_mean <- mean(train_drv$rel_log_cost_m2)
+
+test_metrics <- function(pred, actual) {
+  mse <- mean((actual - pred)^2)
+  c(test_MSE  = mse,
+    test_RMSE = sqrt(mse),
+    test_R2   = 1 - sum((actual - pred)^2) / sum((actual - y_train_mean)^2))
+}
+
+results <- tibble(model = character(), set = character(),
+                  train_R2 = numeric(), adj_R2 = numeric(),
+                  test_MSE = numeric(), test_RMSE = numeric(), test_R2 = numeric())
+
+add_result <- function(results, model, set, fit_R2 = NA, fit_adjR2 = NA, metrics) {
+  results %>% add_row(model = model, set = set,
+                      train_R2 = fit_R2, adj_R2 = fit_adjR2,
+                      test_MSE = metrics[["test_MSE"]],
+                      test_RMSE = metrics[["test_RMSE"]],
+                      test_R2 = metrics[["test_R2"]])
+}
+```
+
+## Simple linear regression, by hand and by `lm()`
+
+The single strongest driver at district level was residential alteration
+spending (section 2). One predictor, the Module 1 formulas, then `lm()` to
+confirm them.
+
+$$b_1 = \frac{\Sigma_{i=1}^{n}(x_i - \bar x)(y_i - \bar y)}{\Sigma_{i=1}^{n}(x_i - \bar x)^2},
+  \qquad b_0 = \bar y - b_1 \bar x$$
+
+```{r}
+x <- train_drv$log_resid_alt_real
+y <- train_drv$rel_log_cost_m2
+
+# slope and intercept from the formulas
+b1 <- sum((x - mean(x)) * (y - mean(y))) / sum((x - mean(x))^2)
+b0 <- mean(y) - b1 * mean(x)
+
+# the same model with lm()
+slr.fit <- lm(rel_log_cost_m2 ~ log_resid_alt_real, data = train_drv)
+
+cat(sprintf("By hand: b0 = %.4f, b1 = %.4f\n", b0, b1))
+cat(sprintf("lm():    b0 = %.4f, b1 = %.4f\n", coef(slr.fit)[1], coef(slr.fit)[2]))
+```
+
+```{r}
+summary(slr.fit)
+
+# confidence interval for b1 from the t distribution, then confint() to check
+n     <- nrow(train_drv)
+se_b1 <- summary(slr.fit)$coefficients["log_resid_alt_real", "Std. Error"]
+t_crit <- qt(1 - 0.05 / 2, df = n - 2)
+cat(sprintf("95%% CI for b1 by hand: (%.4f, %.4f)\n", b1 - t_crit * se_b1, b1 + t_crit * se_b1))
+confint(slr.fit)
+```
+
+```{r}
+ggplot(train_drv, aes(x = log_resid_alt_real, y = rel_log_cost_m2)) +
+  geom_point(alpha = 0.1, size = 0.6) +
+  geom_abline(intercept = b0, slope = b1, colour = "darkorange", linewidth = 1) +
+  labs(title = "Simple linear regression: relative cost on log alteration spending",
+       x = "log(real $ of residential alterations in the quarter)",
+       y = "Relative cost")
+```
+
+```{r}
+pred_slr <- predict(slr.fit, newdata = test_drv)
+m_slr    <- test_metrics(pred_slr, test_drv$rel_log_cost_m2)
+results  <- add_result(results, "Simple linear regression", "one driver",
+                       summary(slr.fit)$r.squared, summary(slr.fit)$adj.r.squared, m_slr)
+paste("The test MSE of the SLR model is", round(m_slr[["test_MSE"]], 5))
+```
+
+The slope is positive and many standard errors from zero: a district that
+spends more on alterations in a quarter is dearer per m² for new houses in
+that quarter. On its own, though, one driver explains about 12% of the
+variation ($R^2 = 0.12$), and the cloud around the line is wide. Alteration
+spending is a proxy for a busy, wealthy market, not the cost itself.
+
+## Multiple linear regression on the drivers
+
+All eleven drivers at once.
+
+```{r}
+mlr.fit <- lm(rel_log_cost_m2 ~ ., data = train_drv)
+summary(mlr.fit)
+```
+
+The raw coefficients are not comparable (a one-unit change in `t_index` is a
+quarter; in `multiunit_share` it is the whole range), so we also show each
+coefficient multiplied by its predictor's standard deviation: the change in
+relative cost for a one-SD change in the driver.
+
+```{r}
+std_coef <- function(fit, data) {
+  b  <- coef(fit)[-1]
+  b  <- b[names(b) %in% names(data)]          # numeric drivers only (skips factor dummies)
+  sds <- sapply(names(b), function(v) sd(data[[v]]))
+  tibble(driver = names(b), coefficient = b, std_coefficient = b * sds)
+}
+
+std_coef(mlr.fit, train_drv) %>%
+  arrange(desc(abs(std_coefficient))) %>%
+  mutate(across(-driver, ~ round(.x, 4))) %>%
+  knitr::kable(caption = "MLR coefficients, raw and per one SD of the driver (training rows)")
+```
+
+```{r, fig.height = 7, out.width = '90%'}
+par(mfrow = c(2, 2))
+plot(mlr.fit)
+par(mfrow = c(1, 1))
+```
+
+The diagnostic plots the labs list but never run. Residuals against fitted
+values show no curve and roughly constant spread; the Q-Q plot has heavier
+tails than a normal — a handful of very dear or very cheap district-quarters
+— but nothing that bends the line; no point approaches a Cook's distance that
+would change the fit if removed. The linear model is a fair description, with
+the caveat that the extremes are under-predicted in both directions.
+
+```{r}
+pred_mlr <- predict(mlr.fit, newdata = test_drv)
+m_mlr    <- test_metrics(pred_mlr, test_drv$rel_log_cost_m2)
+results  <- add_result(results, "Multiple linear regression", "drivers",
+                       summary(mlr.fit)$r.squared, summary(mlr.fit)$adj.r.squared, m_mlr)
+paste("The test MSE of the MLR model is", round(m_mlr[["test_MSE"]], 5))
+```
+
+Read the coefficient table with the correlation heatmap in mind: `avg_house_m2`
+and `rel_house_m2` carry opposite signs, and so do `log_houses_n` and
+`log_resid_alt_real`. That is the signature of collinearity — least squares has
+split the shared signal between the two members of each pair, and the
+individual coefficients should not be read as effect sizes. Section 4 is the
+remedy.
+
+## Adding the district
+
+`ta` as a 67-level factor is the fixed-effects ceiling from section 2: it
+absorbs everything about a district that does not change over time. If the
+drivers were a full explanation of why dear districts are dear, adding `ta`
+would add nothing. `lm()` can hold a factor this size; the tree-based models
+in section 5 cannot, which is why they get `region` instead.
+
+```{r}
+train_ta <- df_train_c %>% dplyr::select(rel_log_cost_m2, all_of(drivers), ta)
+test_ta  <- df_test_c  %>% dplyr::select(rel_log_cost_m2, all_of(drivers), ta)
+
+mlr_ta.fit <- lm(rel_log_cost_m2 ~ ., data = train_ta)
+
+cat("Adjusted R2, drivers only:    ", round(summary(mlr.fit)$adj.r.squared, 3), "\n")
+cat("Adjusted R2, drivers + district:", round(summary(mlr_ta.fit)$adj.r.squared, 3), "\n")
+
+# the drivers' coefficients once district is held fixed (within-district effects)
+std_coef(mlr_ta.fit, train_ta) %>%
+  dplyr::filter(driver %in% drivers) %>%
+  arrange(desc(abs(std_coefficient))) %>%
+  mutate(across(-driver, ~ round(.x, 4))) %>%
+  knitr::kable(caption = "Driver coefficients with district fixed effects (within-district)")
+```
+
+```{r}
+pred_mlr_ta <- predict(mlr_ta.fit, newdata = test_ta)
+m_mlr_ta    <- test_metrics(pred_mlr_ta, test_ta$rel_log_cost_m2)
+results     <- add_result(results, "Multiple linear regression", "drivers + district",
+                          summary(mlr_ta.fit)$r.squared, summary(mlr_ta.fit)$adj.r.squared, m_mlr_ta)
+paste("The test MSE of the MLR + district model is", round(m_mlr_ta[["test_MSE"]], 5))
+```
+
+The district dummies lift the fit well above the drivers alone, which answers
+part of RQ1 on its own: the measured drivers explain some of the gap between
+districts, but a large share is a location premium they do not capture. The
+within-district coefficients are the more trustworthy reading of each driver,
+because they compare a district with itself over time rather than Queenstown
+with Ōpōtiki.
+
+## Forward selection
+
+Which drivers earn their place? Module 2's recipe: `regsubsets()` builds the
+best model of each size by forward selection, and the size is chosen on data
+the model did not see. Instead of a random validation set we hold out the last
+four training years (2016–2019), because the test set is also "the future".
+
+```{r}
+# inner split: fit on 1996-2015, choose the size on 2016-2019
+inner_fit   <- df_train_c %>% dplyr::filter(year <= 2015) %>% dplyr::select(rel_log_cost_m2, all_of(drivers))
+inner_valid <- df_train_c %>% dplyr::filter(year >  2015) %>% dplyr::select(rel_log_cost_m2, all_of(drivers))
+
+fwd.fit <- regsubsets(rel_log_cost_m2 ~ ., data = inner_fit,
+                      nvmax = length(drivers), method = "forward")
+fwd_summary <- summary(fwd.fit)
+
+# validation MSE for each model size, the way Lab M2 does it
+make_predictions <- function(object, newdata, size) {
+  form  <- as.formula(object$call[[2]])
+  mat   <- model.matrix(form, newdata)
+  coefi <- coef(object, id = size)
+  mat[, names(coefi)] %*% coefi
+}
+
+valid_mse <- sapply(1:length(drivers), function(size) {
+  pred <- make_predictions(fwd.fit, inner_valid, size)
+  mean((inner_valid$rel_log_cost_m2 - pred)^2)
+})
+
+best_size <- which.min(valid_mse)
+tibble(size = 1:length(drivers), valid_MSE = valid_mse,
+       adj_R2 = fwd_summary$adjr2, BIC = fwd_summary$bic) %>%
+  mutate(across(-size, ~ round(.x, 5))) %>%
+  knitr::kable(caption = "Forward selection: validation MSE (2016-2019), adjusted R2 and BIC by model size")
+```
+
+```{r}
+plot(1:length(drivers), valid_mse, type = "b", pch = 19,
+     xlab = "Number of drivers", ylab = "Validation MSE (2016-2019)",
+     main = "Forward selection: choosing the model size")
+points(best_size, valid_mse[best_size], col = "darkorange", pch = 19, cex = 2)
+```
+
+```{r}
+cat("Size with the lowest validation MSE:", best_size, "\n")
+cat("Order in which forward selection added the drivers:\n")
+print(apply(fwd_summary$which[, -1], 1, function(r) paste(names(r)[r], collapse = ", ")))
+
+# refit the chosen size on all training rows and test it once
+chosen <- names(coef(fwd.fit, id = best_size))[-1]
+fwd_best.fit <- lm(reformulate(chosen, response = "rel_log_cost_m2"), data = train_drv)
+pred_fwd <- predict(fwd_best.fit, newdata = test_drv)
+m_fwd    <- test_metrics(pred_fwd, test_drv$rel_log_cost_m2)
+results  <- add_result(results, paste0("Forward selection (", best_size, " drivers)"), "drivers",
+                       summary(fwd_best.fit)$r.squared, summary(fwd_best.fit)$adj.r.squared, m_fwd)
+paste("The test MSE of the forward-selected model is", round(m_fwd[["test_MSE"]], 5))
+```
+
+The order the drivers enter is the plain-language ranking of what matters
+when each is allowed to add only what the earlier ones missed: alteration
+spending first, population pressure second, the number of houses third. The
+validation curve does not flatten — it bottoms at three drivers and then
+rises, so on the 2016–2019 years every further driver made the predictions
+slightly worse. Yet the three-driver model then tests *worse* than the full
+eleven-driver MLR on 2020–2026 (0.01506 against 0.01459). The validation
+years and the test years disagree about how complex the model should be,
+which is a fair warning about choosing anything on four years of data; the
+honest reading is that the three drivers carry most of the signal and the
+other eight are worth a little in some periods and nothing in others. Keep
+this in mind for section 4 — the lasso reaches the same three by a different
+route.
+
+## Two transformations worth a look
+
+Module 2 adds terms inside the formula rather than new columns. Two are
+suggested by section 2: population pressure may act with diminishing returns
+(a squared term), and alteration spending may matter more in a district that
+is also building a lot (an interaction).
+
+```{r}
+mlr_poly.fit <- lm(rel_log_cost_m2 ~ . - dwell_per_1000 + poly(dwell_per_1000, 2), data = train_drv)
+mlr_int.fit  <- lm(rel_log_cost_m2 ~ . + log_resid_alt_real:log_houses_n, data = train_drv)
+
+tibble(model = c("MLR, drivers", "+ poly(dwell_per_1000, 2)", "+ log_resid_alt_real:log_houses_n"),
+       adj_R2 = c(summary(mlr.fit)$adj.r.squared,
+                  summary(mlr_poly.fit)$adj.r.squared,
+                  summary(mlr_int.fit)$adj.r.squared),
+       test_MSE = c(m_mlr[["test_MSE"]],
+                    test_metrics(predict(mlr_poly.fit, test_drv), test_drv$rel_log_cost_m2)[["test_MSE"]],
+                    test_metrics(predict(mlr_int.fit,  test_drv), test_drv$rel_log_cost_m2)[["test_MSE"]])) %>%
+  mutate(across(-model, ~ round(.x, 5))) %>%
+  knitr::kable(caption = "Two transformations against the plain MLR")
+
+# R names the term in formula order (log_houses_n:log_resid_alt_real), so find it by pattern
+int_coef <- summary(mlr_int.fit)$coefficients
+int_coef[grepl("log_houses_n.*log_resid_alt_real|log_resid_alt_real.*log_houses_n", rownames(int_coef)), , drop = FALSE]
+```
+
+Neither transformation is kept in the headline model unless it moves the test
+MSE by more than the models in section 4 differ from each other — the reader
+should judge that from the table. The interaction's sign is worth noting even
+if small: a negative value says the alteration premium is weaker in districts
+that are already building a lot, which is consistent with Niwesh's partial
+dependence plot (his fig25).
+
+*Eleven correlated drivers and a model that splits their credit arbitrarily —
+can shrinkage give a steadier answer?*
+
+# Ridge and lasso
+
+Both fit the same linear model as section 3 but add a penalty on the size of
+the coefficients. The tuning parameter $\lambda$ sets how hard the penalty
+bites; $\lambda = 0$ is ordinary least squares.
+
+$$\text{Ridge:}\quad \min_b \; \Sigma_{i=1}^{n}\Big(y_i - b_0 - \Sigma_{j=1}^{p} b_j x_{ij}\Big)^2 + \lambda \Sigma_{j=1}^{p} b_j^2$$
+
+$$\text{Lasso:}\quad \min_b \; \Sigma_{i=1}^{n}\Big(y_i - b_0 - \Sigma_{j=1}^{p} b_j x_{ij}\Big)^2 + \lambda \Sigma_{j=1}^{p} |b_j|$$
+
+The squared penalty shrinks every coefficient towards zero but never to zero;
+the absolute penalty can set coefficients exactly to zero, so the lasso also
+selects. With a correlated pair, ridge tends to share the effect between the
+two; the lasso tends to keep one and drop the other. This is the ISLR2 §6.5
+recipe with `glmnet`, the one package here that is not in a course lab.
+
+## Set up
+
+`glmnet()` wants a numeric matrix and standardises the columns itself
+(`standardize = TRUE` is the default), so the penalty treats every driver
+equally whatever its units.
+
+```{r}
+x_train <- model.matrix(rel_log_cost_m2 ~ ., data = train_drv)[, -1]   # drop the intercept column
+y_train <- train_drv$rel_log_cost_m2
+x_test  <- model.matrix(rel_log_cost_m2 ~ ., data = test_drv)[, -1]
+y_test  <- test_drv$rel_log_cost_m2
+
+dim(x_train)
+```
+
+## Choosing lambda with time-ordered folds
+
+`cv.glmnet()` picks $\lambda$ by cross-validation. Its default folds are
+random, which would again let later quarters inform earlier ones. We hand it
+folds made of year blocks instead — five contiguous blocks of the training
+years — so each fold is validated on years its training folds did not see.
+
+```{r}
+# five contiguous year blocks: 1996-2003, 2004-07, 2008-11, 2012-15, 2016-19
+foldid <- cut(df_train_c$year, breaks = c(1995, 2003, 2007, 2011, 2015, 2019), labels = FALSE)
+table(foldid)
+
+cv.ridge <- cv.glmnet(x_train, y_train, alpha = 0, foldid = foldid)
+cv.lasso <- cv.glmnet(x_train, y_train, alpha = 1, foldid = foldid)
+
+cat(sprintf("Ridge: lambda.min = %.5f, lambda.1se = %.5f\n", cv.ridge$lambda.min, cv.ridge$lambda.1se))
+cat(sprintf("Lasso: lambda.min = %.5f, lambda.1se = %.5f\n", cv.lasso$lambda.min, cv.lasso$lambda.1se))
+```
+
+```{r, fig.height = 4.5, out.width = '100%'}
+par(mfrow = c(1, 2))
+plot(cv.ridge, main = "Ridge: CV error by lambda")
+plot(cv.lasso, main = "Lasso: CV error by lambda")
+par(mfrow = c(1, 1))
+```
+
+Two values of $\lambda$ are marked on each curve: `lambda.min`, where the CV
+error is lowest, and `lambda.1se`, the largest $\lambda$ whose error is within
+one standard error of that minimum — the simplest model that is not
+measurably worse. We report both. Note how far apart they are here (ridge
+0.0037 against 0.138; lasso 0.00004 against 0.0145): with only five
+time-block folds, and folds that differ from each other in how hard they are
+to predict, the standard error of the CV curve is wide, and "within one SE" is
+a generous margin. Section 4.5 shows what that costs on the test set. The
+numbers on top of the lasso plot are how many drivers are still non-zero.
+
+## Coefficient paths
+
+```{r, fig.height = 5, out.width = '100%'}
+ridge.fit <- glmnet(x_train, y_train, alpha = 0)
+lasso.fit <- glmnet(x_train, y_train, alpha = 1)
+
+par(mfrow = c(1, 2))
+plot(ridge.fit, xvar = "lambda", label = TRUE, main = "Ridge coefficient paths")
+abline(v = log(cv.ridge$lambda.1se), lty = 2)
+plot(lasso.fit, xvar = "lambda", label = TRUE, main = "Lasso coefficient paths")
+abline(v = log(cv.lasso$lambda.1se), lty = 2)
+par(mfrow = c(1, 1))
+
+# which number is which driver on the plots
+tibble(label = seq_along(colnames(x_train)), driver = colnames(x_train)) %>%
+  knitr::kable(caption = "Curve labels on the path plots")
+```
+
+Read the plots right to left (large $\lambda$ to small). Ridge's curves all
+leave zero together and grow smoothly; the lasso's leave one at a time, and
+the order they enter is a ranking of the drivers. The dashed line is
+`lambda.1se`.
+
+## Which drivers survive?
+
+The table the poster needs: OLS, ridge and lasso side by side, standardised so
+the sizes compare. A coefficient of 0 in the lasso columns means the driver
+was dropped.
+
+```{r}
+x_sd <- apply(x_train, 2, sd)
+
+coef_at <- function(cvfit, s) as.vector(coef(cvfit, s = s))[-1]   # drop the intercept
+
+coef_table <- tibble(driver = colnames(x_train),
+                     OLS = coef(mlr.fit)[colnames(x_train)],
+                     `Ridge (1se)` = coef_at(cv.ridge, "lambda.1se"),
+                     `Ridge (min)` = coef_at(cv.ridge, "lambda.min"),
+                     `Lasso (1se)` = coef_at(cv.lasso, "lambda.1se"),
+                     `Lasso (min)` = coef_at(cv.lasso, "lambda.min")) %>%
+  mutate(across(-driver, ~ .x * x_sd))   # per one SD of the driver
+
+coef_table %>%
+  arrange(desc(abs(`Lasso (1se)`)), desc(abs(`Ridge (1se)`))) %>%
+  mutate(across(-driver, ~ round(.x, 4))) %>%
+  knitr::kable(caption = "Standardised coefficients (change in relative cost per one SD of the driver)")
+
+cat("Drivers the lasso sets to zero at lambda.1se:",
+    paste(coef_table$driver[coef_table$`Lasso (1se)` == 0], collapse = ", "), "\n")
+cat("Drivers the lasso sets to zero at lambda.min:",
+    paste(coef_table$driver[coef_table$`Lasso (min)` == 0], collapse = ", "), "\n")
+```
+
+```{r, fig.height = 5}
+coef_table %>%
+  dplyr::select(driver, OLS, `Ridge (1se)`, `Lasso (1se)`) %>%
+  pivot_longer(-driver, names_to = "model", values_to = "std_coefficient") %>%
+  mutate(driver = fct_reorder(driver, abs(std_coefficient), .fun = max)) %>%
+  ggplot(aes(x = driver, y = std_coefficient, fill = model)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  geom_hline(yintercept = 0) +
+  labs(title = "What each model says about each driver",
+       x = NULL, y = "Standardised coefficient", fill = NULL) +
+  theme(legend.position = "bottom")
+```
+
+Look first at the two correlated pairs from section 2. Under OLS
+`log_houses_n` and `log_resid_alt_real` carry opposite signs (−0.030 and
++0.061 per SD); ridge at `lambda.1se` pulls them to the same sign (+0.005 and
++0.011) by sharing the credit; the lasso at `lambda.1se` keeps alteration
+spending and sets the house count to zero. The house-size pair goes the same
+way: OLS gives them opposite signs, ridge shrinks both to nearly nothing, the
+lasso drops both. At `lambda.1se` the lasso keeps exactly two drivers —
+`log_resid_alt_real` and `dwell_per_1000` — the first two that forward
+selection chose; at `lambda.min` it keeps all eleven and its coefficients are
+within 0.001 of OLS. So the two penalised models agree with each other
+and with section 3.5 on what matters, and that agreement, not any single
+coefficient, is the answer to "which parameters are important": alteration
+spending and population pressure are the drivers of relative cost the data
+will support in a linear model, with the number of houses a distant third.
+
+## Test performance
+
+```{r}
+for (nm in c("lambda.1se", "lambda.min")) {
+  m_r <- test_metrics(as.vector(predict(cv.ridge, newx = x_test, s = nm)), y_test)
+  m_l <- test_metrics(as.vector(predict(cv.lasso, newx = x_test, s = nm)), y_test)
+  results <- add_result(results, paste0("Ridge (", nm, ")"), "drivers", metrics = m_r)
+  results <- add_result(results, paste0("Lasso (", nm, ")"), "drivers", metrics = m_l)
+}
+
+results %>%
+  dplyr::filter(set == "drivers") %>%
+  mutate(across(where(is.numeric), ~ round(.x, 5))) %>%
+  knitr::kable(caption = "Drivers-only models so far: training fit and test error")
+```
+
+At `lambda.min`, ridge and lasso test within a hair of OLS (0.01468 and
+0.01458 against 0.01459): with eleven drivers and over five thousand rows the
+model is not over-fitted, so there is nothing for the penalty to fix. At
+`lambda.1se` both are clearly worse (0.01618 and 0.01669; test $R^2$ falls
+from 0.21 to 0.13 and 0.10) — the one-SE rule, applied to a CV curve with
+wide standard errors, threw away real signal. The lesson for this dataset is
+to use `lambda.min` when the model has to predict, and to use the lasso's
+*path* — the order in which drivers enter as $\lambda$ falls — when the
+question is which drivers matter. The gain from shrinkage here is in reading
+the coefficients, not in the error.
+
+## Ridge and lasso with region
+
+A penalised model cannot hold a 67-level district factor sensibly (each dummy
+would be shrunk towards zero regardless of how well it is estimated), but the
+17 region dummies are a fair middle ground between "drivers only" and "drivers
+plus district".
+
+```{r}
+train_reg <- df_train_c %>% dplyr::select(rel_log_cost_m2, all_of(drivers), region)
+test_reg  <- df_test_c  %>% dplyr::select(rel_log_cost_m2, all_of(drivers), region)
+
+x_train_reg <- model.matrix(rel_log_cost_m2 ~ ., data = train_reg)[, -1]
+x_test_reg  <- model.matrix(rel_log_cost_m2 ~ ., data = test_reg)[, -1]
+
+cv.ridge.reg <- cv.glmnet(x_train_reg, y_train, alpha = 0, foldid = foldid)
+cv.lasso.reg <- cv.glmnet(x_train_reg, y_train, alpha = 1, foldid = foldid)
+
+for (nm in c("lambda.1se", "lambda.min")) {
+  m_r <- test_metrics(as.vector(predict(cv.ridge.reg, newx = x_test_reg, s = nm)), y_test)
+  m_l <- test_metrics(as.vector(predict(cv.lasso.reg, newx = x_test_reg, s = nm)), y_test)
+  results <- add_result(results, paste0("Ridge (", nm, ")"), "drivers + region", metrics = m_r)
+  results <- add_result(results, paste0("Lasso (", nm, ")"), "drivers + region", metrics = m_l)
+}
+
+# the region dummies the lasso keeps, and the driver coefficients once region is in
+lasso_reg_coef <- as.vector(coef(cv.lasso.reg, s = "lambda.1se"))[-1]
+names(lasso_reg_coef) <- colnames(x_train_reg)
+
+cat("Region dummies kept by the lasso at lambda.1se:\n")
+print(round(lasso_reg_coef[grepl("^region", names(lasso_reg_coef)) & lasso_reg_coef != 0], 4))
+
+results %>%
+  dplyr::filter(grepl("Ridge|Lasso", model)) %>%
+  arrange(set, model) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 5))) %>%
+  knitr::kable(caption = "Ridge and lasso: drivers only vs drivers + region")
+```
+
+The regions the lasso keeps are the ones whose premium or discount the
+drivers cannot account for; the regions it drops are explained by their
+drivers. Three survive at `lambda.1se`: Wellington (+0.025) and Hawke's Bay
+(+0.014) dearer than their drivers say, Manawatū-Whanganui (−0.010) cheaper.
+Auckland, Canterbury and Otago do not appear — their premiums are carried by
+the drivers, Auckland's by population pressure and alteration spending in
+particular. With region in, ridge and lasso at `lambda.min` test at 0.01357,
+between the drivers-only MLR (0.01459) and the district model (0.01179): the
+17 regions recover about a third of what the 67 districts know. That list is
+a compact answer to the "location premium" half of RQ1 and sits naturally
+beside the district ranking from section 2.
+
+*The linear family has had its say. Do models that can find thresholds and
+interactions on their own — trees — see anything the straight lines missed?*
+
+# Tree-based models
+
+Trees split the data on one driver at a time, so they find thresholds and
+interactions without being told where to look, and they are indifferent to
+the collinearity that troubled section 3. Their weakness is the opposite of
+the linear model's: a tree can only predict values it has seen, so it cannot
+follow a trend out of the training years. The models here are fitted on the
+drivers plus `region` — `tree()` caps a factor at 32 levels and
+`randomForest()` at 53, so the 67-level `ta` cannot go in. Module 6's recipe
+throughout.
+
+```{r}
+# short region codes, so a split on several regions fits on the tree plot
+region_short <- c("Northland Region" = "Nthld", "Auckland Region" = "Akl",
+                  "Waikato Region" = "Wkto", "Bay of Plenty Region" = "BoP",
+                  "Gisborne Region" = "Gis", "Hawke's Bay Region" = "HB",
+                  "Taranaki Region" = "Tnki", "Manawatu-Whanganui Region" = "MWh",
+                  "Wellington Region" = "Wgtn", "Tasman Region" = "Tas",
+                  "Nelson Region" = "Nsn", "Marlborough Region" = "Marl",
+                  "West Coast Region" = "WC", "Canterbury Region" = "Cant",
+                  "Otago Region" = "Otago", "Southland Region" = "Sthld",
+                  "Area Outside Region" = "Chat")
+
+# data.frames rather than tibbles: gbm() in particular wants the base class
+train_tree <- as.data.frame(train_reg) %>%
+  mutate(region = factor(region_short[as.character(region)], levels = unname(region_short)))
+test_tree  <- as.data.frame(test_reg) %>%
+  mutate(region = factor(region_short[as.character(region)], levels = unname(region_short)))
+
+stopifnot(!anyNA(train_tree$region), !anyNA(test_tree$region))
+
+tibble(code = unname(region_short), region = names(region_short)) %>%
+  knitr::kable(caption = "Region codes used in the tree plots")
+```
+
+## Regression tree
+
+```{r}
+tree.fit <- tree(rel_log_cost_m2 ~ ., data = train_tree)
+summary(tree.fit)
+```
+
+```{r, fig.width = 13, fig.height = 7, out.width = '100%'}
+# type = "uniform" gives every level the same height; the default scales branch
+# length by deviance, which leaves the first split with the whole canvas
+plot(tree.fit, type = "uniform")
+text(tree.fit, pretty = 0, cex = 0.7, digits = 3)
+```
+
+The first split is the plain-language headline of the tree: whichever driver
+sits at the top is the single most useful yes/no question about a
+district-quarter. The leaves are mean relative costs for the rows that reach
+them. A split on `region` lists the codes that go left; everything else goes
+right. Branch lengths carry no information in this layout; the node listing
+below gives each split's rows, deviance and mean, which is where the worth of
+a split is read.
+
+```{r}
+tree.fit
+```
+
+Module 6 prunes with cross-validation: grow the full tree, ask how the
+deviance changes with the number of leaves, and cut back to the size with the
+lowest CV deviance.
+
+```{r}
+set.seed(462)
+cv.reg <- cv.tree(tree.fit)
+best.size <- cv.reg$size[which.min(cv.reg$dev)]
+
+plot(cv.reg$size, cv.reg$dev, type = "b", pch = 19,
+     xlab = "Number of terminal nodes", ylab = "CV deviance",
+     main = "Choosing the tree size by cross-validation")
+points(best.size, min(cv.reg$dev), col = "darkorange", pch = 19, cex = 2)
+cat("Tree size with the lowest CV deviance:", best.size, "\n")
+```
+
+```{r}
+pruned.tree <- prune.tree(tree.fit, best = best.size)
+
+pred_tree   <- predict(tree.fit,    newdata = test_tree)
+pred_pruned <- predict(pruned.tree, newdata = test_tree)
+m_tree   <- test_metrics(pred_tree,   test_tree$rel_log_cost_m2)
+m_pruned <- test_metrics(pred_pruned, test_tree$rel_log_cost_m2)
+
+results <- add_result(results, "Regression tree (full)",   "drivers + region", metrics = m_tree)
+results <- add_result(results, paste0("Regression tree (pruned, ", best.size, " leaves)"),
+                      "drivers + region", metrics = m_pruned)
+paste("Test MSE: full tree", round(m_tree[["test_MSE"]], 5),
+      " pruned tree", round(m_pruned[["test_MSE"]], 5))
+```
+
+If the CV curve chose the full tree, pruning changes nothing and the two rows
+are identical — that happens when `tree()`'s default stopping rule already
+grew a modest tree. A single tree is easy to read and usually the weakest
+predictor in this section; it is here for the picture, and as the building
+block of the next two models.
+
+## Bagging and random forest
+
+Bagging grows many trees on bootstrap samples of the training rows and
+averages them; a random forest does the same but offers each split only a
+random subset of the drivers, which de-correlates the trees. In
+`randomForest()` the only difference is `mtry`: all predictors for bagging,
+about a third of them for a regression forest.
+
+```{r}
+num_predictors <- ncol(train_tree) - 1     # 11 drivers + region
+
+set.seed(462)
+bag.tree <- randomForest(rel_log_cost_m2 ~ ., data = train_tree,
+                         mtry = num_predictors, ntree = 500, importance = TRUE)
+set.seed(462)
+rf.tree  <- randomForest(rel_log_cost_m2 ~ ., data = train_tree,
+                         mtry = 4, ntree = 500, importance = TRUE)
+bag.tree
+rf.tree
+```
+
+The printed "% Var explained" is out-of-bag — each row predicted only by the
+trees that did not see it — so it is an honest training-side estimate without
+a validation set.
+
+```{r, fig.height = 5, out.width = '100%'}
+varImpPlot(rf.tree, main = "Random forest: variable importance", cex = 0.8)
+```
+
+```{r}
+importance(rf.tree) %>%
+  as.data.frame() %>%
+  rownames_to_column("driver") %>%
+  arrange(desc(`%IncMSE`)) %>%
+  mutate(across(-driver, ~ round(.x, 2))) %>%
+  knitr::kable(caption = "Random forest importance: % increase in MSE when the driver is permuted, and node purity")
+```
+
+`%IncMSE` is the one to read: how much worse the out-of-bag predictions get
+when that driver's values are shuffled. It is model-agnostic in spirit and the
+closest thing a forest has to the standardised coefficients of section 4, so
+the two rankings can be compared directly — a driver that is near the top in
+both the lasso table and here is important in any reasonable model.
+
+```{r}
+pred_bag <- predict(bag.tree, newdata = test_tree)
+pred_rf  <- predict(rf.tree,  newdata = test_tree)
+m_bag <- test_metrics(pred_bag, test_tree$rel_log_cost_m2)
+m_rf  <- test_metrics(pred_rf,  test_tree$rel_log_cost_m2)
+
+results <- add_result(results, "Bagging (mtry = 12)",       "drivers + region", metrics = m_bag)
+results <- add_result(results, "Random forest (mtry = 4)",  "drivers + region", metrics = m_rf)
+paste("Test MSE: bagging", round(m_bag[["test_MSE"]], 5), " random forest", round(m_rf[["test_MSE"]], 5))
+```
+
+## Boosting
+
+Boosting grows small trees one after another, each fitted to the residuals of
+the ensemble so far, scaled down by the shrinkage. For a continuous response
+the distribution is `"gaussian"`. Module 6 uses stumps (`interaction.depth =
+1`); depth 2 lets each tree hold one interaction, which section 3 suggested
+exists.
+
+```{r}
+set.seed(462)
+boost.fit <- gbm(rel_log_cost_m2 ~ ., data = train_tree,
+                 distribution = "gaussian", n.trees = 1000,
+                 interaction.depth = 2, shrinkage = 0.05, verbose = FALSE)
+
+# relative influence: share of the total reduction in squared error attributed to each driver
+summary(boost.fit, plotit = FALSE) %>%
+  mutate(rel.inf = round(rel.inf, 2)) %>%
+  knitr::kable(caption = "Boosting: relative influence of each driver")
+```
+
+```{r}
+pred_boost <- predict(boost.fit, newdata = test_tree, n.trees = 1000, type = "response")
+m_boost <- test_metrics(pred_boost, test_tree$rel_log_cost_m2)
+results <- add_result(results, "Boosting (1000 trees, depth 2)", "drivers + region", metrics = m_boost)
+paste("The test MSE of the boosted model is", round(m_boost[["test_MSE"]], 5))
+```
+
+Three importance rankings now exist — lasso coefficients, forest `%IncMSE`,
+boosting relative influence. Section 6 puts them side by side.
+
+## Tuning the ensembles and the elastic net
+
+The forest and the boosted model above use settings chosen by habit —
+`mtry = 4` and `nodesize = 5`; 1,000 trees at depth 2 with shrinkage 0.05 —
+and the ridge and lasso are the two endpoints of the elastic net. This
+section asks whether any of those choices matter, using the same five
+time-block folds as section 4.2 so that every setting is judged on years it
+did not see. The test set is not touched until one setting per model has been
+chosen.
+
+```{r}
+# blocked cross-validation: fit on four year-blocks, score on the fifth, repeat
+cv_blocked <- function(fit_fun, pred_fun, data, foldid) {
+  sapply(sort(unique(foldid)), function(k) {
+    fit  <- fit_fun(data[foldid != k, ])
+    pred <- pred_fun(fit, data[foldid == k, ])
+    sqrt(mean((data$rel_log_cost_m2[foldid == k] - pred)^2))
+  })
+}
+```
+
+### Random forest: `mtry` and `nodesize`
+
+`nodesize` is the smallest leaf the forest is allowed to grow; small leaves
+memorise individual district-quarters, large ones average over them. `mtry`
+is how many drivers each split may choose from. Six combinations, 300 trees
+each inside the folds (enough to rank settings; the chosen one is refitted
+with 500).
+
+```{r tune-rf, cache = TRUE}
+rf_grid <- expand.grid(mtry = c(4, 12), nodesize = c(5, 20, 50))
+
+rf_cv <- map_dfr(seq_len(nrow(rf_grid)), function(i) {
+  set.seed(462)
+  fold_rmse <- cv_blocked(
+    fit_fun  = function(d) randomForest(rel_log_cost_m2 ~ ., data = d, ntree = 300,
+                                        mtry = rf_grid$mtry[i], nodesize = rf_grid$nodesize[i]),
+    pred_fun = function(fit, d) predict(fit, newdata = d),
+    data = train_tree, foldid = foldid)
+  tibble(mtry = rf_grid$mtry[i], nodesize = rf_grid$nodesize[i],
+         cv_RMSE = mean(fold_rmse), cv_RMSE_se = sd(fold_rmse) / sqrt(length(fold_rmse)))
+})
+
+rf_cv %>%
+  arrange(cv_RMSE) %>%
+  mutate(across(c(cv_RMSE, cv_RMSE_se), ~ round(.x, 5))) %>%
+  knitr::kable(caption = "Random forest: blocked-CV RMSE by mtry and nodesize")
+
+rf_best <- rf_cv %>% arrange(cv_RMSE) %>% slice(1)
+cat("Chosen: mtry =", rf_best$mtry, " nodesize =", rf_best$nodesize, "\n")
+```
+
+```{r}
+set.seed(462)
+rf_tuned.tree <- randomForest(rel_log_cost_m2 ~ ., data = train_tree, ntree = 500,
+                              mtry = rf_best$mtry, nodesize = rf_best$nodesize, importance = TRUE)
+
+m_rf_tuned <- test_metrics(predict(rf_tuned.tree, newdata = test_tree), test_tree$rel_log_cost_m2)
+results <- add_result(results, paste0("Random forest (tuned: mtry = ", rf_best$mtry,
+                                      ", nodesize = ", rf_best$nodesize, ")"),
+                      "drivers + region", metrics = m_rf_tuned)
+paste("Test MSE: untuned forest", round(m_rf[["test_MSE"]], 5),
+      " tuned forest", round(m_rf_tuned[["test_MSE"]], 5))
+```
+
+The forest is insensitive to both settings: the six combinations span
+0.0862–0.0871 in CV RMSE with a standard error of about 0.003 on each, so
+nothing separates them, and the habit choice (`mtry = 4`, `nodesize = 5`)
+happens to sit at the top. The tuned and untuned test errors are therefore
+identical (0.01140). The worry that 5-row leaves were memorising
+district-quarters does not show up — averaging 500 trees already smooths
+that away — and the forest's answer is settled by the drivers it is given,
+not by how it is grown.
+
+### Boosting: shrinkage, depth and the number of trees
+
+Boosting's settings interact: a smaller shrinkage needs more trees, and a
+deeper tree needs fewer. Four combinations of shrinkage and depth; for each,
+the number of trees is chosen on the folds by scoring the ensemble every 100
+trees (one `predict()` call per fold returns all of them at once).
+
+```{r tune-gbm, cache = TRUE}
+gbm_grid  <- expand.grid(shrinkage = c(0.01, 0.05), depth = c(2, 4))
+tree_seq  <- seq(100, 3000, by = 100)
+
+gbm_cv <- map_dfr(seq_len(nrow(gbm_grid)), function(i) {
+  # per fold: RMSE at every candidate number of trees
+  fold_curves <- sapply(sort(unique(foldid)), function(k) {
+    set.seed(462)
+    fit <- gbm(rel_log_cost_m2 ~ ., data = train_tree[foldid != k, ],
+               distribution = "gaussian", n.trees = max(tree_seq),
+               interaction.depth = gbm_grid$depth[i], shrinkage = gbm_grid$shrinkage[i],
+               verbose = FALSE)
+    preds <- predict(fit, newdata = train_tree[foldid == k, ], n.trees = tree_seq, type = "response")
+    sqrt(colMeans((train_tree$rel_log_cost_m2[foldid == k] - preds)^2))
+  })
+  curve <- rowMeans(fold_curves)                       # mean RMSE across folds at each n.trees
+  tibble(shrinkage = gbm_grid$shrinkage[i], depth = gbm_grid$depth[i],
+         n_trees = tree_seq[which.min(curve)], cv_RMSE = min(curve),
+         cv_RMSE_se = sd(fold_curves[which.min(curve), ]) / sqrt(ncol(fold_curves)),
+         curve = list(tibble(n_trees = tree_seq, cv_RMSE = curve)))
+})
+
+gbm_cv %>%
+  dplyr::select(-curve) %>%
+  arrange(cv_RMSE) %>%
+  mutate(across(c(cv_RMSE, cv_RMSE_se), ~ round(.x, 5))) %>%
+  knitr::kable(caption = "Boosting: blocked-CV RMSE at the best number of trees for each shrinkage x depth")
+
+gbm_best <- gbm_cv %>% arrange(cv_RMSE) %>% slice(1)
+cat("Chosen: shrinkage =", gbm_best$shrinkage, " depth =", gbm_best$depth,
+    " n.trees =", gbm_best$n_trees, "\n")
+```
+
+```{r}
+gbm_cv %>%
+  dplyr::select(shrinkage, depth, curve) %>%
+  unnest(curve) %>%
+  mutate(setting = paste0("shrinkage ", shrinkage, ", depth ", depth)) %>%
+  ggplot(aes(x = n_trees, y = cv_RMSE, colour = setting)) +
+  geom_line() +
+  labs(title = "Boosting: blocked-CV RMSE against the number of trees",
+       x = "Number of trees", y = "Mean CV RMSE across the five blocks", colour = NULL) +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+set.seed(462)
+boost_tuned.fit <- gbm(rel_log_cost_m2 ~ ., data = train_tree,
+                       distribution = "gaussian", n.trees = gbm_best$n_trees,
+                       interaction.depth = gbm_best$depth, shrinkage = gbm_best$shrinkage,
+                       verbose = FALSE)
+
+m_boost_tuned <- test_metrics(predict(boost_tuned.fit, newdata = test_tree,
+                                      n.trees = gbm_best$n_trees, type = "response"),
+                              test_tree$rel_log_cost_m2)
+results <- add_result(results, paste0("Boosting (tuned: ", gbm_best$n_trees, " trees, depth ",
+                                      gbm_best$depth, ", shrinkage ", gbm_best$shrinkage, ")"),
+                      "drivers + region", metrics = m_boost_tuned)
+paste("Test MSE: untuned boosting", round(m_boost[["test_MSE"]], 5),
+      " tuned boosting", round(m_boost_tuned[["test_MSE"]], 5))
+```
+
+This is the one tuning that paid. Depth matters more than shrinkage: both
+depth-4 settings reach a CV RMSE of 0.0880, both depth-2 settings stop at
+0.089–0.090, a gap of about one standard error but consistent across the
+folds. Shrinkage 0.05 at depth 4 bottoms out at 1,100 trees and then climbs
+— past that point it is fitting noise — while shrinkage 0.01 at depth 4 is
+still edging down at 3,000 trees and would probably match or just pass it
+with a longer grid, for a gain in the fourth decimal. The chosen setting
+(0.05, depth 4, 1,100 trees) tests at 0.01138, against 0.01224 for the
+habit setting, which moves boosting from fourth place to level with the
+forests. The reason depth helps fits what the single tree showed: the useful
+structure is region-by-driver, which a depth-2 tree can only half express.
+
+### Elastic net: `alpha` between ridge and lasso
+
+`alpha` mixes the two penalties — 0 is ridge, 1 is lasso. Five values, each
+tuned for $\lambda$ on the same folds, compared at `lambda.min` (section 4.5
+showed the one-SE rule is too blunt on these folds).
+
+```{r}
+alpha_grid <- c(0, 0.25, 0.5, 0.75, 1)
+
+enet_cv <- map_dfr(alpha_grid, function(a) {
+  fit <- cv.glmnet(x_train_reg, y_train, alpha = a, foldid = foldid)
+  tibble(alpha = a,
+         lambda_min = fit$lambda.min,
+         cv_RMSE = sqrt(min(fit$cvm)),
+         n_nonzero = sum(as.vector(coef(fit, s = "lambda.min"))[-1] != 0),
+         fit = list(fit))
+})
+
+enet_cv %>%
+  dplyr::select(-fit) %>%
+  mutate(across(c(lambda_min, cv_RMSE), ~ round(.x, 5))) %>%
+  knitr::kable(caption = "Elastic net (drivers + region): blocked-CV RMSE at lambda.min by alpha")
+
+enet_best <- enet_cv %>% arrange(cv_RMSE) %>% slice(1)
+m_enet <- test_metrics(as.vector(predict(enet_best$fit[[1]], newx = x_test_reg, s = "lambda.min")), y_test)
+results <- add_result(results, paste0("Elastic net (alpha = ", enet_best$alpha, ", lambda.min)"),
+                      "drivers + region", metrics = m_enet)
+cat("Chosen alpha:", enet_best$alpha, " test MSE:", round(m_enet[["test_MSE"]], 5), "\n")
+```
+
+A flat line, as expected: CV RMSE runs from 0.0961 at `alpha = 0` to 0.0958
+at `alpha = 1`, a spread of 0.0003 with all five mixtures keeping 19–27 of
+the 27 columns. The lasso wins by a hair and tests identically to its
+section 4.6 row (0.01356). On this data the choice of penalty is cosmetic
+and the choice of features is not, which is the sentence for the poster.
+
+::: {.boxNote}
+**Why the relative response matters most for the trees.** Every tree model
+here predicts a leaf mean learnt from 1996–2019 rows. Asked about 2024, a
+forest fitted on log *real* $/m² can only return costs it saw before 2020,
+and under-predicts every test year by the whole post-2019 rise. On the
+relative response there is no trend to miss: a district 20% dearer than the
+rest of the country in 2019 is predicted 20% dearer in 2024, which is the
+right kind of guess. Section 6.7 shows the size of the gap on the real
+response.
+:::
+
+*A dozen models, one test set. Which is best, and does the answer depend on
+the model?*
+
+# Evaluate performance
+
+## Sensitivity: the two early-years drivers
+
+The headline frame starts in 1996 because `dwell_per_1000` and `houses_yoy`
+do not exist before then. One row to show what that cost: the multiple linear
+regression without those two drivers, fitted on all 7,051 training rows from
+1990Q2 and tested on all 1,611 test rows.
+
+```{r}
+drivers_9 <- setdiff(drivers, c("dwell_per_1000", "houses_yoy"))
+
+train_9 <- df_train %>% dplyr::select(rel_log_cost_m2, all_of(drivers_9))
+test_9  <- df_test  %>% dplyr::select(rel_log_cost_m2, all_of(drivers_9))
+mlr_9.fit <- lm(rel_log_cost_m2 ~ ., data = train_9)
+
+# same drivers on the headline frame, so the only difference is the rows
+mlr_9c.fit <- lm(rel_log_cost_m2 ~ ., data = train_drv %>% dplyr::select(rel_log_cost_m2, all_of(drivers_9)))
+
+m_9  <- test_metrics(predict(mlr_9.fit,  test_9),  test_9$rel_log_cost_m2)
+m_9c <- test_metrics(predict(mlr_9c.fit, test_drv), test_drv$rel_log_cost_m2)
+
+results <- add_result(results, "MLR, 9 drivers, all rows 1990+", "sensitivity",
+                      summary(mlr_9.fit)$r.squared, summary(mlr_9.fit)$adj.r.squared, m_9)
+results <- add_result(results, "MLR, 9 drivers, headline rows",  "sensitivity",
+                      summary(mlr_9c.fit)$r.squared, summary(mlr_9c.fit)$adj.r.squared, m_9c)
+
+cat(sprintf("Rows: %d (1990+) vs %d (1996+)\n", nrow(train_9), nrow(train_drv)))
+cat(sprintf("Test MSE, 9 drivers: %.5f on 1990+ rows, %.5f on 1996+ rows; 11 drivers on 1996+: %.5f\n",
+            m_9[["test_MSE"]], m_9c[["test_MSE"]], m_mlr[["test_MSE"]]))
+```
+
+Two comparisons fall out. The second row against the first says what the
+1990–95 rows add when the drivers are held fixed; the second row against the
+headline MLR says what the two dropped drivers add when the rows are held
+fixed. If the second gap is the larger, keeping the drivers was the right
+trade.
+
+## Goodness-of-fit (training data)
+
+$$R^2 = \frac{TSS - RSS}{TSS}, \qquad
+  \bar R^2 = 1 - \frac{RSS / (n - p - 1)}{TSS / (n - 1)}$$
+
+```{r}
+results %>%
+  dplyr::filter(!is.na(train_R2)) %>%
+  dplyr::select(model, set, train_R2, adj_R2) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
+  knitr::kable(caption = "Training R2 and adjusted R2 for the least-squares models")
+
+cat("For reference, the out-of-bag % variance explained: bagging",
+    round(tail(bag.tree$rsq, 1) * 100, 1), " random forest", round(tail(rf.tree$rsq, 1) * 100, 1), "\n")
+```
+
+The district-fixed-effects model is the ceiling: no model of measured drivers
+should be expected to beat it on the training data, and the distance between
+it and the best drivers-only model is the share of the between-district
+difference that the drivers do not explain.
+
+## Test MSE and RMSE (2020Q1–2026Q2)
+
+```{r}
+results_test <- results %>%
+  arrange(test_RMSE) %>%
+  mutate(rank = row_number()) %>%
+  dplyr::select(rank, model, set, test_MSE, test_RMSE, test_R2)
+
+results_test %>%
+  mutate(across(where(is.numeric), ~ round(.x, 5))) %>%
+  knitr::kable(caption = "Every model on the same 1,611 test district-quarters, best first")
+```
+
+```{r, fig.height = 6}
+results_test %>%
+  mutate(model = fct_reorder(paste(model, "-", set), -test_RMSE)) %>%
+  ggplot(aes(x = model, y = test_RMSE, fill = set)) +
+  geom_col() +
+  coord_flip() +
+  geom_hline(yintercept = sqrt(mean((y_test - y_train_mean)^2)), linetype = "dashed") +
+  labs(title = "Test RMSE by model (dashed line: predict the training mean)",
+       x = NULL, y = "Test RMSE (log relative cost)", fill = NULL) +
+  theme(legend.position = "bottom")
+```
+
+A test RMSE of 0.10 on a log scale means a typical prediction is about 10%
+off the district's actual cost relative to the rest of New Zealand. The
+dashed line is the no-model baseline. Read the table with two questions:
+which model is best, and how far apart are the models — if the spread among
+the sensible models is a few thousandths of RMSE, the choice of model matters
+much less than the choice of drivers, and the poster should say so.
+
+## Comparison with Niwesh's build
+
+Niwesh's `03_rq1_models.Rmd` fitted the same response on the same quarters
+(his frame is ours minus Chatham Islands and Kawerau, two training rows) with
+different packages (`glmnet` with his own tuning loop, `ranger`, `rpart`).
+His test results are in `t09_test_results.csv`; where the two builds share a
+model, the test RMSE should agree to the third decimal. Where they do not,
+the reason is a difference in method and should be nameable.
+
+```{r}
+niwesh_file <- file.path(data_root, "t09_test_results.csv")
+
+if (file.exists(niwesh_file)) {
+  niwesh <- read_csv(niwesh_file, show_col_types = FALSE) %>%
+    dplyr::select(niwesh_model = model, niwesh_set = set, niwesh_test_RMSE = test_rmse, niwesh_test_R2 = test_r2)
+
+  # the pairs of models that are the same thing in both builds
+  model_pairs <- tribble(
+    ~model,                               ~set,                 ~niwesh_model,       ~niwesh_set,
+    "Multiple linear regression",         "drivers",            "Linear regression", "drivers",
+    "Multiple linear regression",         "drivers + district", "Linear regression", "district",
+    "Ridge (lambda.1se)",                 "drivers",            "Ridge",             "drivers",
+    "Lasso (lambda.1se)",                 "drivers",            "Lasso",             "drivers",
+    "Random forest (mtry = 4)",           "drivers + region",   "Random forest",     "drivers")
+
+  comparison <- model_pairs %>%
+    inner_join(results, by = c("model", "set")) %>%
+    inner_join(niwesh, by = c("niwesh_model", "niwesh_set")) %>%
+    mutate(diff_RMSE = test_RMSE - niwesh_test_RMSE) %>%
+    dplyr::select(model, set, test_RMSE, niwesh_model, niwesh_set, niwesh_test_RMSE, diff_RMSE, test_R2, niwesh_test_R2)
+
+  comparison %>%
+    mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
+    knitr::kable(caption = "Our test RMSE vs Niwesh's for the models both builds fitted")
+} else {
+  cat("t09_test_results.csv not found in", data_root, "- comparison skipped.\n")
+}
+```
+
+The two linear regressions are the same estimator on the same drivers, so
+their gap (0.0045 RMSE on the drivers set, 0.0020 with district) is larger
+than it should be. Two rows differ in training, but three differ in the test
+set — Chatham Islands and Kawerau have one and two test rows — and a tiny
+district can carry a very large error. Our MLR scored on exactly his 1,608
+test rows:
+
+```{r}
+his_test_rows <- !df_test_c$ta %in% c("Chatham Islands Territory", "Kawerau District")
+
+cat(sprintf("MLR, drivers:            RMSE %.4f on all %d test rows, %.4f on Niwesh's %d\n",
+            sqrt(mean((test_drv$rel_log_cost_m2 - pred_mlr)^2)), nrow(test_drv),
+            sqrt(mean((test_drv$rel_log_cost_m2[his_test_rows] - pred_mlr[his_test_rows])^2)), sum(his_test_rows)))
+cat(sprintf("MLR, drivers + district: RMSE %.4f on all %d test rows, %.4f on Niwesh's %d\n",
+            sqrt(mean((test_ta$rel_log_cost_m2 - pred_mlr_ta)^2)), nrow(test_ta),
+            sqrt(mean((test_ta$rel_log_cost_m2[his_test_rows] - pred_mlr_ta[his_test_rows])^2)), sum(his_test_rows)))
+
+# the three rows themselves
+df_test_c %>%
+  dplyr::filter(!his_test_rows) %>%
+  mutate(predicted = pred_mlr[!his_test_rows], error = rel_log_cost_m2 - predicted) %>%
+  dplyr::select(ta, yq, houses_n, rel_log_cost_m2, predicted, error) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3))) %>%
+  knitr::kable(caption = "The three test rows Niwesh's build does not score")
+```
+
+The gap does not close. On his 1,608 rows our drivers-only regression
+scores 0.1202 against his 0.1162, and the district regression 0.1084
+against his 0.1066: the Chatham Islands row (five houses, error 0.49) was
+worth 0.0006 and the rest remains. Same estimator, same eleven drivers by
+name, same response, same quarters — so the difference is upstream, in what
+each build fed the model. Candidates, in the order I would check them on
+Monday: whether his `drivers` set is the same eleven columns (his VIF table
+lists them, but a feature set for fitting can differ from one for a VIF
+check); whether he standardised or transformed any driver before `lm()`;
+whether his train rows are the 5,694 the README says or a different cut.
+Until this is understood neither number goes on the poster. The
+other pairings differ for known reasons. Ridge and lasso: his tuning chose
+$\lambda \approx 0.0004$, which is OLS in all but name, while our
+`lambda.1se` values are 300–3,000 times larger — compare his numbers with our
+`lambda.min` rows instead, which sit within 0.001 of OLS. Random forest: ours
+has `region` and his does not, and it is 0.0066 RMSE better for it — the same
+lesson as section 4.6, that geography is worth more than any tuning.
+
+## Which drivers matter — three rankings side by side
+
+```{r}
+rank_lasso <- coef_table %>%
+  transmute(driver, lasso = abs(`Lasso (1se)`)) %>%
+  mutate(lasso_rank = min_rank(-lasso))
+
+rank_rf <- importance(rf.tree) %>%
+  as.data.frame() %>%
+  rownames_to_column("driver") %>%
+  transmute(driver, rf = `%IncMSE`) %>%
+  mutate(rf_rank = min_rank(-rf))
+
+rank_boost <- summary(boost.fit, plotit = FALSE) %>%
+  transmute(driver = as.character(var), boost = rel.inf) %>%
+  mutate(boost_rank = min_rank(-boost))
+
+rank_lasso %>%
+  full_join(rank_rf, by = "driver") %>%
+  full_join(rank_boost, by = "driver") %>%
+  dplyr::filter(driver %in% drivers) %>%
+  mutate(mean_rank = rowMeans(cbind(lasso_rank, rf_rank, boost_rank), na.rm = TRUE)) %>%
+  arrange(mean_rank) %>%
+  mutate(across(c(lasso, rf, boost, mean_rank), ~ round(.x, 3))) %>%
+  knitr::kable(caption = "Driver rankings: lasso |coefficient| (1se), forest %IncMSE, boosting relative influence")
+```
+
+This is the table that answers the "which parameters are important" half of
+RQ1. A driver ranked near the top by all three — a linear model with
+selection, a bagged ensemble with permutation importance, and a boosted
+ensemble — is important in a way that does not depend on the modelling
+choice. A driver that is high in one and low in the others is picking up
+something model-specific (the forest and boosting can use a driver through
+interactions that the lasso cannot see), and the text should say which.
+
+## Bootstrap standard errors for the headline coefficients
+
+Module 5's check on the standard errors `summary()` reports: refit the
+drivers-only linear model on 100 bootstrap samples of the training rows and
+take the standard deviation of each coefficient across refits. If the
+bootstrap SE is much larger than the formula SE, the formula's assumptions
+(independent, equal-variance errors) are being strained — plausible here,
+since the 5,696 rows are 67 districts observed repeatedly.
+
+```{r}
+set.seed(462)
+bootstrap_samples <- replicate(n = 100,
+                               expr = train_drv[sample(1:nrow(train_drv), replace = TRUE), ],
+                               simplify = FALSE)
+
+boot_fits  <- lapply(bootstrap_samples, function(s) lm(rel_log_cost_m2 ~ ., data = s))
+boot_coefs <- sapply(boot_fits, coef)      # one column per bootstrap fit
+
+# the three drivers with the largest standardised OLS coefficients
+top3 <- std_coef(mlr.fit, train_drv) %>%
+  arrange(desc(abs(std_coefficient))) %>%
+  slice(1:3) %>% pull(driver)
+
+tibble(driver = top3,
+       estimate     = coef(mlr.fit)[top3],
+       formula_SE   = summary(mlr.fit)$coefficients[top3, "Std. Error"],
+       bootstrap_SE = apply(boot_coefs[top3, , drop = FALSE], 1, sd),
+       boot_CI_low  = apply(boot_coefs[top3, , drop = FALSE], 1, quantile, probs = 0.025),
+       boot_CI_high = apply(boot_coefs[top3, , drop = FALSE], 1, quantile, probs = 0.975)) %>%
+  mutate(ratio = bootstrap_SE / formula_SE,
+         across(-driver, ~ round(.x, 4))) %>%
+  knitr::kable(caption = "Formula vs bootstrap standard errors, 100 bootstrap refits")
+
+confint(mlr.fit)[top3, ]
+```
+
+```{r}
+ggplot(data.frame(b = boot_coefs[top3[1], ]), aes(x = b)) +
+  geom_histogram(bins = 25, fill = "steelblue", colour = "white") +
+  geom_vline(xintercept = coef(mlr.fit)[top3[1]], colour = "darkorange", linewidth = 1) +
+  labs(title = paste("Bootstrap distribution of the coefficient on", top3[1]),
+       x = "Coefficient across 100 bootstrap refits", y = "Count") +
+  theme_minimal()
+```
+
+A ratio near 1 says the formula SEs can be trusted; a ratio well above 1 says
+the real uncertainty is larger and the confidence intervals in section 3
+should be read as optimistic. Note what the bootstrap does *not* fix: rows
+from the same district are resampled independently, so district-level
+clustering is still ignored. A block bootstrap by district would be the
+stricter check, and is outside this document's scope.
+
+## The real response and the extrapolation problem
+
+Finally, the response as the pitch worded it: log real $/m² itself. Two
+models, the ones at the two extremes of the extrapolation question — the
+drivers-plus-district linear model, which carries a straight-line trend in
+`t_index`, and the random forest, which cannot extrapolate at all.
+
+```{r}
+train_real    <- df_train_c %>% dplyr::select(log_real_cost_m2, all_of(drivers), ta)
+test_real     <- df_test_c  %>% dplyr::select(log_real_cost_m2, all_of(drivers), ta)
+train_real_rf <- as.data.frame(df_train_c %>% dplyr::select(log_real_cost_m2, all_of(drivers), region))
+test_real_rf  <- as.data.frame(df_test_c  %>% dplyr::select(log_real_cost_m2, all_of(drivers), region))
+
+mlr_real.fit <- lm(log_real_cost_m2 ~ ., data = train_real)
+set.seed(462)
+rf_real.tree <- randomForest(log_real_cost_m2 ~ ., data = train_real_rf, mtry = 4, ntree = 500)
+
+pred_real_lm <- predict(mlr_real.fit, newdata = test_real)
+pred_real_rf <- predict(rf_real.tree, newdata = test_real_rf)
+
+real_metrics <- function(pred, actual) {
+  c(test_RMSE = sqrt(mean((actual - pred)^2)),
+    test_R2   = 1 - sum((actual - pred)^2) / sum((actual - mean(train_real$log_real_cost_m2))^2),
+    mean_bias = mean(pred - actual))
+}
+
+rbind(`MLR, drivers + district` = real_metrics(pred_real_lm, test_real$log_real_cost_m2),
+      `Random forest, drivers + region` = real_metrics(pred_real_rf, test_real$log_real_cost_m2)) %>%
+  round(4) %>%
+  knitr::kable(caption = "Log real $/m2 as the response: test RMSE, R2 and mean bias (negative = under-prediction)")
+```
+
+```{r}
+df_test_c %>%
+  mutate(`MLR + district` = pred_real_lm, `Random forest` = pred_real_rf) %>%
+  dplyr::select(year, actual = log_real_cost_m2, `MLR + district`, `Random forest`) %>%
+  pivot_longer(-year, names_to = "series", values_to = "value") %>%
+  group_by(year, series) %>%
+  summarise(mean_real = mean(exp(value)), .groups = "drop") %>%
+  ggplot(aes(x = year, y = mean_real, colour = series)) +
+  geom_line() + geom_point() +
+  labs(title = "Real $/m2 in the test years: actual vs predicted (mean over districts)",
+       x = "Year", y = "Real $/m2, June-2026 dollars", colour = NULL) +
+  theme(legend.position = "bottom")
+```
+
+Two things in this figure are easy to misread. First, in June-2026 dollars
+the test years are nearly flat — the national mean sits between about $3,180
+and $3,340 per m² across 2020–2026, dipping in 2022 and rising through 2024.
+The 2021–23 cost spike that everyone remembers is a *nominal* spike, and the
+CGPI deflator has taken most of it out; what is left is the few percent by
+which house prices outran the construction price index. Second, the $R^2$
+values (0.75 and 0.70) are far higher than anything in the relative-cost
+tables, not because the models are better but because the between-district
+differences are back in the response and both models carry location.
+
+Within that, the extrapolation problem shows as predicted, at a smaller
+scale: the forest sits about 4% low across the whole test period (mean bias
+−0.042) and drifts lower after 2022, because its `t_index` leaves end at 2019
+and nothing in the drivers tells it that real costs kept rising; the linear
+model's straight trend tracks the level well (bias +0.011) but overshoots by
+2026. Neither is a safe way to forecast real dollars. The relative model is
+the one to trust across districts, and real $/m² is best answered as "the
+national series times the district's relative position", which is how the
+poster should put it.
+
+## Where this leaves RQ1
+
+The three parts of the answer, each pointing at the table or figure that
+supports it:
+
+Location first. Adding the district to the linear model lifts adjusted $R^2$
+from 0.19 to 0.40 (section 3.4), and the same districts sit at the top and
+bottom of the ranking for thirty years (section 2.2) — Queenstown-Lakes 16%
+above the rest of the country at the median, Wellington City 11%, Ōpōtiki 17%
+below. Whatever makes them so is mostly not in this dataset — land,
+remoteness, the kind of houses being built. The three regional dummies the
+lasso keeps (section 4.6: Wellington and Hawke's Bay dear, Manawatū-Whanganui
+cheap) are the compact list of where that unexplained premium sits after the
+drivers have had their say.
+
+Of the drivers we can measure, two survive every model: residential
+alteration spending and new dwellings per 1,000 residents. They are the first
+two forward selection picks (section 3.5), the only two the lasso keeps at
+`lambda.1se` (section 4.4), and the top two in both the forest's permutation
+importance and boosting's relative influence once `region` is set aside
+(section 6.5). The number of houses consented is a clear third in the linear
+models and the time index third in the tree models; the rest add little. The
+within-district coefficients (section 3.4) give the sizes — about +0.03 in
+log relative cost per SD of alteration spending, +0.004 per SD of population
+pressure once district is held fixed — and the bootstrap (section 6.6) says
+the formula standard errors understate the uncertainty by only 8–13%.
+
+The models fall into two bands, and the band matters more than the model.
+Anything that carries geography — bagging, tuned boosting and the random
+forest (test RMSE 0.106–0.107), the district-effects regression (0.109),
+even untuned boosting (0.111) — beats anything that has only the eleven
+drivers (0.121–0.129), and within a band the choice of algorithm moves the
+error by a few thousandths. Section 5.4 makes the same point from the other
+side: a tuning grid over the forest changed nothing, over the elastic net
+changed nothing, and over boosting moved it from the bottom of the upper
+band to the top of it. The poster
+should lead with that: location explains most of the difference between
+districts, two measured drivers explain a useful part of the rest, and the
+algorithm is the least important choice. Niwesh's independent build (section
+6.4) landing in the same places — his district regression at 0.107, his
+forest at 0.113 without region — is the check that this is a property of the
+data and not of one person's code; the one open gap, 0.004 on the
+drivers-only regression after scoring on his rows, is Monday's first
+question.
+
+*End of document (stages 1–6; section 7, extensions, to follow)*

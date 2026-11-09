@@ -1,0 +1,27 @@
+column,description
+ta,"Territorial authority (district / city), as named by Stats NZ (no macrons)"
+region,"Regional council area (majority-population assignment, see data/reference)"
+island,North / South / Chatham
+is_city,"TRUE for city councils (name ends in 'City', plus Auckland)"
+"year, quarter, yq","Calendar year, quarter (1-4) and label such as 2019Q3"
+t_index,"Quarter number, 1990Q1 = 1 (numeric time trend)"
+split,train (to 2019Q4) or test (2020Q1 to 2026Q2)
+in_model,TRUE if at least 5 new houses (row used for modelling)
+real_cost_m2,"RESPONSE: consented value per m2 of new houses, June-2026-quarter dollars incl. 15% GST, deflated by CGPI dwelling units"
+log_real_cost_m2,Natural log of real_cost_m2
+rel_log_cost_m2,RESPONSE (relative): log(real_cost_m2) minus log of real $/m2 of all OTHER districts in the same quarter
+rel_house_m2,"log(avg_house_m2 / average new-house size in all other districts, same quarter)"
+"loo_cost_m2, loo_house_m2","Leave-one-out national real $/m2 and average house size (all other districts, same quarter)"
+nominal_cost_m2,"Value / floor area in dollars of the day, GST incl. (reference only)"
+"houses_n, houses_m2, houses_val","New houses consented: count, floor area (m2), value ($ nominal, GST incl.)"
+"dwell_n, apt_n, retire_n, town_n","New dwelling units: total, apartments, retirement village units, townhouses/flats/units"
+"resid_new_val, resid_alt_val, nonres_new_val","Nominal $ value: new residential, residential alterations, new non-residential"
+avg_house_m2,Average floor area of a new house (m2)
+log_houses_n,log(number of new houses)
+multiunit_share,Share of new dwellings that are not stand-alone houses
+"apt_share, retire_share",Share of new dwellings that are apartments / retirement village units
+dwell_per_1000,"New dwellings in the 12 months to the quarter-end, per 1000 residents (from 1996)"
+houses_yoy,log((houses + 1) / (houses same quarter last year + 1))
+"log_resid_alt_real, log_nonres_real",log(1 + real $) of residential alterations / new non-residential work
+"real_cost_m2_lag1, _lag4",real_cost_m2 one / four quarters earlier (NA if that quarter had too few houses)
+"gst, cgpi_*, real_factor","GST rate of the day, price indices, and the multiplier nominal -> real"
