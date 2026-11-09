@@ -562,7 +562,8 @@ turning points depend on economic conditions (interest rates, migration, credit)
 # Interactive app {#app}
 
 The Shiny app `app/app.R` presents the three questions for readers who want to explore the results rather than read
-code. It uses only the saved models and processed data.
+code. It uses only the saved models and processed data, and is available online at
+<https://niwesh.shinyapps.io/nz-building-consents/>.
 
 * **RQ1:** select a district and move sliders for its drivers to see both final models' predicted cost per m², next
   to the actual cost and its history.

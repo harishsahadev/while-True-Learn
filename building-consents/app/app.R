@@ -30,6 +30,7 @@ source(file.path(proj_root, "R", "utils_data.R"))
 source(file.path(proj_root, "R", "utils_models.R"))      # make_x()
 path_of <- function(...) file.path(proj_root, ...)
 addResourcePath("figs", path_of("outputs", "figures"))   # serve the notebook figures to the browser
+addResourcePath("assets", path_of("communication", "assets"))   # pitch-deck font and background
 
 short_name <- function(x) str_remove(x, " District| City")
 pct  <- function(x, d = 0) sprintf(paste0("%+.", d, "f%%"), 100 * x)
@@ -72,7 +73,7 @@ members2 <- fit2$membership |> left_join(rq2$raw |> select(ta, all_of(vars2), dw
 # k-means numbered its clusters arbitrarily; the notebook renumbered them by size
 km_to_market <- map_int(seq_len(nrow(fit2$centres_z)),
                         \(o) unique(members2$cluster[fit2$kmeans$cluster == o]))
-market_cols <- set_names(c("#2a6f97", "#e76f51", "#2a9d8f"), fit2$cluster_names)
+market_cols <- set_names(c("#5C5148", "#C76B0A", "#FBAC4D"), fit2$cluster_names)   # as in the poster and slides
 
 transform2 <- function(df) df |>
   mutate(across(c(apt_share, retire_share, town_share, nonres_share), sqrt),
@@ -96,13 +97,37 @@ acc3   <- res3$test$accuracy[res3$test$model == "Logistic regression"]
 auc3   <- res3$test$auc[res3$test$model == "Logistic regression"]
 
 # ---- UI -----------------------------------------------------------------------
-theme <- bs_theme(version = 5, primary = "#2a6f97")
+# ---- Look: the group's pitch-deck style (peach background, orange accents, Open Sauce One) ----
+pitch <- list(ink = "#2B2B2B", muted = "#5C5148", orange = "#FBAC4D", dark = "#C76B0A", border = "#EDB46E",
+              tint = "#FFF8EF")
+theme <- bs_theme(version = 5, bg = pitch$tint, fg = pitch$ink, primary = pitch$dark, secondary = pitch$muted,
+                  base_font = "'Open Sauce One', Arial, sans-serif", heading_font = "'Open Sauce One', Arial, sans-serif") |>
+  bs_add_rules("
+    .navbar { background: rgba(255, 248, 239, 0.88) !important; border-bottom: 1px solid #EDB46E; }
+    .navbar-brand { font-weight: 800; display: flex; align-items: center; gap: .5rem; }
+    .navbar-brand::before { content: ''; width: .8rem; height: .8rem; border-radius: 50%; background: #FBAC4D; }
+    .card:not(.bslib-value-box), .bslib-sidebar-layout { background: rgba(255, 255, 255, 0.62) !important;
+                                   border: 1px solid #EDB46E !important; border-radius: .9rem !important; }
+    .bslib-sidebar-layout > .sidebar { background: rgba(255, 248, 239, 0.75) !important; }
+    .card-header { background: transparent; font-weight: 700; border-bottom: 1px solid #EDB46E; }
+    .bslib-value-box { border: 0 !important; border-radius: .9rem !important; }
+    .bslib-value-box.bg-primary, .bslib-value-box.bg-primary * { color: #FFFFFF !important; }
+  ")
+# font files and background image: referenced from the page (not the compiled theme CSS), so the
+# relative addresses also work when the app runs under a sub-path such as shinyapps.io
+pitch_head <- tags$head(tags$style(HTML(paste0(
+  paste0("@font-face { font-family: 'Open Sauce One'; src: url('assets/fonts/OpenSauceOne-", c("Regular", "Bold", "ExtraBold"),
+         ".ttf'); font-weight: ", c(400, 700, 800),
+         # the font has no superscript two: leave that character to Arial so "m²" still shows
+         "; unicode-range: U+0000-00B1, U+00B3-FFFF; }", collapse = "\n"),
+  "\nbody { background: #FFF3E5 url('assets/pitch_background.png') center top / cover fixed no-repeat; }"))))
 
 slider_pct <- function(id, label, min, max, value, step = 1)
   sliderInput(id, label, min = min, max = max, value = value, step = step, post = "%")
 
 ui <- page_navbar(
   title = "What New Zealand builds",
+  header = pitch_head,
   id = "nav",
   theme = theme,
   fillable = FALSE,            # pages scroll; cards keep their natural height
@@ -116,23 +141,23 @@ ui <- page_navbar(
            every month. We used the August 2026 release to answer three questions, one with each family of methods
            from STAT462. Each tab lets you explore a question with the models we fitted."),
         p(class = "text-muted small",
-          "Group 8, while True: learn(): Niwesh Baraj, Andrew Boulton, Harish Sahadev M. Data: Stats NZ, CC BY 4.0.
+          "Group 8, while True: learn(): Andrew Boulton, Harish Sahadev M, Niwesh Baraj. Data: Stats NZ, CC BY 4.0.
            All dollar values are real (June 2026 dollars, including 15% GST).")
       )),
       card(card_header("RQ1 · Regression"),
-           card_body(fig_img("figs/rq1/fig26_district_premium.png", "District premium"),
+           card_body(fig_img("figs/communication/c04_rq1_drivers.png", "What makes a district dearer"),
                      strong("What drives the cost per m² of new houses?"),
                      p("Location matters most. Of the measured drivers, renovation spending (+8% to +11%) and fast
                         population growth raise cost. The drivers explain about a fifth of the gap between districts.
                         Best model: ridge regression with district, within about 8% of actual cost in 2020–26."))),
       card(card_header("RQ2 · Clustering"),
-           card_body(fig_img("figs/rq2/fig07_clusters_pca.png", "Clusters"),
+           card_body(fig_img("figs/communication/c05_rq2_markets.png", "Three kinds of building market"),
                      strong("What kinds of building markets are there?"),
                      p("Three: house-building districts (30), slow provincial districts (21) and urban
                         medium-density markets (15). k-means and hierarchical clustering agree on 60 of 66
                         districts, but the groups summarise a continuum rather than sharply separate types."))),
       card(card_header("RQ3 · Classification"),
-           card_body(fig_img("figs/rq3/fig05_test_by_year.png", "Predicted vs actual by year"),
+           card_body(fig_img("figs/communication/c08_rq3_accuracy.png", "Prediction accuracy"),
                      strong("Will a district's consents rise next year?"),
                      p(sprintf("Only modestly predictable: logistic regression is right %.0f%% of the time on 2018–2025
                                 (AUC %.2f), against 53%% for the best simple rule. Districts rise and fall together with
@@ -167,8 +192,8 @@ ui <- page_navbar(
                   p(textOutput("v_actual_rel", inline = TRUE)), theme = "light"),
         card(card_header("Real cost per m² of new houses: this district vs the rest of New Zealand"),
              plotOutput("p_hist1", height = 300)),
-        card(card_header("How each driver changes predicted cost"),
-             fig_img("figs/rq1/fig24_partial_dependence.png", "Partial dependence plots")),
+        card(card_header("What makes a district dearer to build in"),
+             fig_img("figs/communication/c04_rq1_drivers.png", "Effect of each driver")),
         card(card_header("Location premium before and after the drivers"),
              fig_img("figs/rq1/fig26_district_premium.png", "District premium"))
       )
@@ -234,7 +259,7 @@ ui <- page_navbar(
         card(card_header("Logistic regression: probability of a rise in 2026, every district"),
              plotOutput("p_all3", height = 1000)),
         card(card_header("Districts rise and fall together"),
-             fig_img("figs/rq3/fig01_share_rising_by_year.png", "Share of districts rising by year")),
+             fig_img("figs/communication/c07_rq3_together.png", "Share of districts rising by year")),
         card(card_header("What moves the odds"),
              fig_img("figs/rq3/fig06_odds_ratios.png", "Odds ratios"))
       )
@@ -282,7 +307,7 @@ server <- function(input, output, session) {
   output$v_actual    <- renderText(paste0(dollars(row1()$real_cost_m2), " / m²"))
   output$v_actual_rel <- renderText(paste("rest of NZ:", dollars(row1()$loo_cost_m2), "/ m²,", row1()$last_quarter))
 
-  output$p_hist1 <- renderPlot({
+  output$p_hist1 <- renderPlot(bg = "transparent", {
     rq1_hist |> filter(ta == input$d1) |>
       mutate(date = year + (as.integer(as.character(quarter)) - 1) / 4) |>
       select(date, `This district` = real_cost_m2, `Rest of NZ` = loo_cost_m2) |>
@@ -290,7 +315,7 @@ server <- function(input, output, session) {
       ggplot(aes(date, value, colour = name)) +
       geom_vline(xintercept = 2020, linetype = 2, colour = "grey60") +
       geom_line(linewidth = 0.8) +
-      scale_colour_manual(values = c("This district" = "#e76f51", "Rest of NZ" = "#2a6f97")) +
+      scale_colour_manual(values = c("This district" = pitch$dark, "Rest of NZ" = pitch$muted)) +
       scale_y_continuous(labels = scales::label_dollar(accuracy = 1)) +
       labs(x = NULL, y = "Real $ per m²", colour = NULL,
            caption = "Quarters with at least 5 new houses. Dashed line: start of the test period.") +
@@ -338,7 +363,8 @@ server <- function(input, output, session) {
                   marker = list(size = 18, color = "rgba(0,0,0,0)", line = list(color = "black", width = 2))) |>
       add_markers(x = whatif2()$pc[1], y = whatif2()$pc[2], name = "Slider profile", hoverinfo = "skip",
                   marker = list(size = 14, symbol = "x", color = "black")) |>
-      layout(xaxis = list(title = "PC1: building intensity, bigger houses →"),
+      layout(paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)",
+             xaxis = list(title = "PC1: building intensity, bigger houses →"),
              yaxis = list(title = "PC2: denser and dearer →"), legend = list(orientation = "h", y = -0.15))
   })
 
@@ -388,12 +414,12 @@ server <- function(input, output, session) {
   output$v_prob_note <- renderText(sprintf("%s · with the district's own 2025 values: %.0f%%",
     if (prob3() > 0.5) "leans towards a rise" else "leans towards a fall", 100 * row3()$prob))
 
-  output$p_all3 <- renderPlot({
+  output$p_all3 <- renderPlot(bg = "transparent", {
     fc3 |> mutate(name = fct_reorder(short_name(ta), prob), selected = ta == input$d3) |>
       ggplot(aes(prob, name, fill = selected)) +
       geom_col(width = 0.75) +
       geom_vline(xintercept = 0.5, linetype = 2) +
-      scale_fill_manual(values = c(`TRUE` = "#e76f51", `FALSE` = "#9ecae1"), guide = "none") +
+      scale_fill_manual(values = c(`TRUE` = pitch$dark, `FALSE` = pitch$orange), guide = "none") +
       scale_x_continuous(labels = scales::percent, limits = c(0, 1)) +
       labs(x = "Probability of a rise in 2026 (using 2025 values)", y = NULL) +
       theme_minimal(base_size = 12) + theme(axis.text.y = element_text(size = 9), panel.grid.major.y = element_blank())

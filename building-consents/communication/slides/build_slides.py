@@ -47,7 +47,9 @@ ALT = {"c01_cost_by_district_2025.png": "Bar chart: real cost per square metre o
        "c05_rq2_markets.png": "Scatter plot: 66 districts coloured by market, on the first two principal components",
        "c06_rq2_profiles.png": "Bar charts: median district of each market on four features",
        "c07_rq3_together.png": "Bar chart: share of districts building more homes than the year before, by year",
-       "c08_rq3_accuracy.png": "Bar chart: share of district-years where next year's direction was called correctly"}
+       "c08_rq3_accuracy.png": "Bar chart: share of district-years where next year's direction was called correctly",
+       "qr_app.png": "QR code linking to the interactive app at niwesh.shinyapps.io/nz-building-consents"}
+APP_URL = "niwesh.shinyapps.io/nz-building-consents"
 
 # ---------------------------------------------------------------- element helpers
 def run(text, size=17, bold=False, color="ink", italic=False):
@@ -68,7 +70,7 @@ def card(x, y, w, h, fill="white"):
     return shape(x, y, w, h, fill, "round", alpha=0.55 if fill == "white" else None, line="border")
 
 def img(name, x, y, w=None, h=None):
-    path = FIG / name
+    path = Path(name) if Path(name).is_absolute() else FIG / name
     iw, ih = Image.open(path).size
     ar = ih / iw
     if w is not None and h is not None:
@@ -303,12 +305,16 @@ els += text_card(0.5, 4.75, 7.6, 2.05, "Limits and next steps",
                  "Consent values are estimates and exclude land. Adding land prices, interest rates and migration is the most "
                  "promising next step.")
 els += [shape(8.3, 4.75, 4.55, 2.05, "orange", "round"),
-        text(8.55, 4.92, 4.1, 1.75, [para(run("Try it yourself", 19, True, "ink"), after=6),
-                                     para(run("Our interactive app lets you pick a district and ask \"what if\". Quick demo next.", 15, False, "ink"))])]
+        text(8.5, 4.9, 2.75, 1.8, [para(run("Try it yourself", 18, True, "ink"), after=4),
+                                   para(run("Pick a district and ask \"what if\"", 13, False, "ink"), after=6),
+                                   para(run("niwesh.shinyapps.io/", 11, True, "ink"), after=0),
+                                   para(run("nz-building-consents", 11, True, "ink"), after=0)]),
+        shape(11.3, 4.92, 1.38, 1.38, "white", "round"),
+        img(str(ASSETS / "qr_app.png"), 11.36, 4.98, 1.26, 1.26)]
 slides.append(dict(presenter="niwesh", topic="Conclusion", els=els,
     notes="Niwesh: To sum up: place matters most, New Zealand has three soft-edged building markets, and the national cycle "
           "rules next year's direction. Consent values are estimates that leave out land, and the big economic drivers aren't "
-          "in the data. Finally, a quick look at our app. [Demo, about 35 seconds: open the RQ1 tab, pick Selwyn, drag "
+          "in the data. Finally, a quick look at our app, which is live online. [Demo, about 35 seconds, at niwesh.shinyapps.io/nz-building-consents: open the RQ1 tab, pick Selwyn, drag "
           "renovation spending up and show the predicted cost rise; switch to the RQ3 tab to show 2026 probabilities.] "
           "Thank you, we're happy to take questions."))
 
@@ -335,6 +341,7 @@ els.append(text(0.6, 5.55, 12.2, 1.4, [
     para(run("Stats NZ. (2026). Building consents issued: August 2026 [Data set]. CC BY 4.0. "
              "https://www.stats.govt.nz/information-releases/building-consents-issued-august-2026", 10.5, False, "muted"), after=2),
     para(run("James, G., Witten, D., Hastie, T., & Tibshirani, R. (2021). An introduction to statistical learning (2nd ed.). Springer.", 10.5, False, "muted"), after=2),
+    para(run(f"Interactive app: https://{APP_URL}/", 10.5, True, "ink"), after=2),
     para(run("AI use: Claude (Anthropic) helped write and debug R code and edit text; all analysis choices and results were reviewed by the group.",
              10.5, False, "muted"), after=0)]))
 slides.append(dict(presenter="niwesh", topic="Appendix", els=els, notes="Appendix for questions: methods, validation and results in technical terms."))

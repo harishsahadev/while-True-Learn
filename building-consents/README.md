@@ -8,6 +8,8 @@ answer three questions, one for each family of methods in the course: regression
 The analysis is in R Markdown notebooks. The results are presented in a report, a poster, a slide deck and an
 interactive Shiny app.
 
+**Try the app online:** <https://niwesh.shinyapps.io/nz-building-consents/> (it may take up to 30 seconds to wake up).
+
 ---
 
 ## Research questions and findings
@@ -110,7 +112,7 @@ as described in `data/raw/README.md`. All column definitions are in `docs/data_d
 
    Slow chunks are cached in `*_cache/` folders; delete a folder to force a full re-run.
 
-3. **App:** `shiny::runApp("app")`, or open `app/app.R` and click *Run App*. Add `?tab=rq1` (or `rq2`, `rq3`) to
+3. **App:** online at <https://niwesh.shinyapps.io/nz-building-consents/>. To run it locally: `shiny::runApp("app")`, or open `app/app.R` and click *Run App*. Add `?tab=rq1` (or `rq2`, `rq3`) to
    the address to open a tab directly.
 
 4. **Poster and slides** (optional, after step 2):

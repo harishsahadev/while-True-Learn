@@ -37,6 +37,10 @@
   header .who .rings span:first-child { left: 0; background: var(--orange); }
   header .who .rings span:last-child { left: 6mm; border: 1.2pt solid var(--orange); }
   header .who b { font-size: 15pt; }
+  header .qr { position: absolute; right: 18mm; top: 5mm; width: 33mm; background: #fff; border: 1pt solid var(--border);
+               border-radius: 3mm; padding: 1.5mm; }
+  header .qrtext { position: absolute; right: 58mm; top: 12mm; text-align: right; font-size: 12pt; line-height: 1.35; }
+  header .qrtext b { color: var(--dark); font-size: 13pt; }
 
   h2 { margin: 0 0 2mm; font-size: 19pt; font-weight: 700; display: flex; align-items: center; gap: 2.5mm; }
   h2::before { content: ""; width: 5mm; height: 5mm; border-radius: 50%; background: var(--orange); flex: none; }
@@ -90,6 +94,8 @@
 
   <header>
     <div class="circle"></div>
+    <img class="qr" src="../assets/qr_app.png" alt="QR code linking to the interactive app">
+    <div class="qrtext">Try the interactive app<br><b>niwesh.shinyapps.io/nz-building-consents</b></div>
     <h1>What New Zealand builds,<br>where, and at what cost</h1>
     <div class="sub">Machine learning on 36 years of Stats NZ building consents</div>
     <div class="who"><span class="rings"><span></span><span></span></span>
@@ -224,7 +230,7 @@
       <p>Stats NZ. (2026). <i>Building consents issued: August 2026</i> [Data set]. CC BY 4.0. https://www.stats.govt.nz/information-releases/building-consents-issued-august-2026</p>
       <p>Stats NZ. (2026). <i>Business price indexes: June 2026 quarter</i> [Data set]. CC BY 4.0.</p>
       <p>James, G., Witten, D., Hastie, T., &amp; Tibshirani, R. (2021). <i>An introduction to statistical learning</i> (2nd ed.). Springer.</p>
-      <p class="muted">Full references in the report.</p>
+      <p class="muted">Full references in the report. Interactive app: https://niwesh.shinyapps.io/nz-building-consents/</p>
       <p class="muted"><b>AI use:</b> Claude (Anthropic) helped write and debug R code and edit text; all analysis
          choices and results were reviewed by the group.</p>
     </div>
