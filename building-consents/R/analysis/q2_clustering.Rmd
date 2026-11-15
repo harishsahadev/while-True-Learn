@@ -1,0 +1,366 @@
+---
+title: "Q2: What kinds of building markets does New Zealand have?"
+subtitle: "k-means and hierarchical clustering of 67 districts, 2015–2025"
+author: "while True: learn() · Group 8 · STAT462"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+---
+
+```{r setup, include = FALSE}
+Sys.setenv(LANG = "en")
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, fig.align = "center",
+                      out.width = "80%", fig.width = 8, fig.height = 4.5)
+
+# all paths come from config.R (see building-consents/README.md, "Linking the data")
+source("../config.R")
+
+library(tidyverse)
+library(knitr)
+library(cluster)
+library(ggrepel)
+set.seed(seed)
+
+theme_set(theme_minimal(base_size = 12) + theme(legend.position = "top"))
+```
+
+**Question.** Do New Zealand's 67 districts fall into distinct *types* of building market, and what are those types?
+
+**Unit.** One district, profiled over `r min(q2_years)`–`r max(q2_years)`. There is no label to predict, so this is unsupervised learning. The profiles come from `R/scripts/04_q2_profiles.R`.
+
+```{r load}
+prof <- readRDS(derived_file("q2_profiles.rds"))
+base_period <- attr(prof, "base_period")
+short <- function(x) str_remove(x, " (District|City|Territory)$")
+prof <- prof %>% mutate(name = short(area))
+cat("Districts:", nrow(prof), "\n")
+```
+
+# The district profile
+
+Every feature is a share, a rate or a ratio, so a district's *size* does not drive the clustering. Auckland and Kaikōura can end up together if they build in the same way. Totals are pooled over the 11 years before dividing, which keeps the ratios of small districts stable.
+
+```{r features}
+feats <- c("share_townhouses", "share_apartments", "share_retirement",
+           "real_m2", "m2_per_house", "alt_share", "nonres_area_share",
+           "growth", "volatility", "per1000")
+
+feat_info <- tribble(
+  ~feature,            ~theme,       ~meaning,
+  "share_townhouses",  "Type mix",   "Townhouses, flats and units as a share of new dwellings",
+  "share_apartments",  "Type mix",   "Apartments as a share of new dwellings",
+  "share_retirement",  "Type mix",   "Retirement village units as a share of new dwellings",
+  "real_m2",           "Cost",       paste0("Real $/m² of new houses (", base_period, " dollars, CGPI-deflated)"),
+  "m2_per_house",      "Cost",       "Average floor area of a new house (m²)",
+  "alt_share",         "Activity",   "Alterations as a share of residential consent value",
+  "nonres_area_share", "Activity",   "Non-residential share of new floor area",
+  "growth",            "Dynamics",   "log(dwellings 2021–25 / dwellings 2015–19)",
+  "volatility",        "Dynamics",   "SD of year-on-year log change in dwellings",
+  "per1000",           "Intensity",  "New dwellings per 1,000 residents, yearly average"
+)
+kable(feat_info, caption = "Clustering features")
+```
+
+**Inflation.** Cost is compared in *real* dollars: each quarter's house value is deflated by the residential CGPI before pooling. Otherwise a district that built mostly in 2022–25 would look expensive just because it built when prices were high. The other features are counts or same-period ratios, so inflation cancels out of them.
+
+```{r distributions, fig.height = 5}
+prof %>%
+  select(name, all_of(feats)) %>%
+  mutate(across(all_of(feats), ~ as.numeric(scale(.x)))) %>%
+  pivot_longer(-name, names_to = "feature", values_to = "z") %>%
+  ggplot(aes(z, fct_rev(factor(feature, levels = feats)))) +
+  geom_boxplot(outlier.colour = "#c1121f", fill = "grey92") +
+  geom_text(data = ~ filter(.x, abs(z) > 3.5), aes(label = name),
+            size = 3, vjust = -0.8, colour = "#c1121f") +
+  labs(title = "Standardised features: a few districts sit far out",
+       x = "z-score", y = NULL)
+```
+
+```{r correlation, fig.height = 5.5, fig.width = 7}
+cm <- cor(prof[feats])
+as_tibble(cm, rownames = "a") %>%
+  pivot_longer(-a, names_to = "b", values_to = "r") %>%
+  mutate(a = factor(a, levels = feats), b = factor(b, levels = rev(feats))) %>%
+  ggplot(aes(a, b, fill = r)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = sprintf("%.2f", r)), size = 2.8) +
+  scale_fill_gradient2(low = "#2a6f97", mid = "white", high = "#c1121f", limits = c(-1, 1)) +
+  labs(title = "Correlation between features", x = NULL, y = NULL, fill = "r") +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1), legend.position = "right")
+```
+
+Distance-based methods need the features on one scale, otherwise `real_m2` (thousands) would swamp the shares (0–1). Every feature is standardised to mean 0 and SD 1.
+
+```{r scale}
+X <- scale(prof[feats])
+rownames(X) <- prof$name
+D <- dist(X)   # Euclidean distance between standardised profiles
+```
+
+# How many clusters?
+
+Three criteria are computed for k = 1 to 8, each fitted with k-means using 100 random starts:
+
+- **Elbow:** total within-cluster sum of squares. Look for the point where adding clusters stops helping.
+- **Average silhouette:** how much closer each district is to its own cluster than to the next nearest, from −1 to 1.
+- **Gap statistic:** within-cluster dispersion compared with data that has no clusters (200 reference sets).
+
+```{r choose-k, cache = TRUE, cache.extra = file.mtime(derived_file("q2_profiles.rds"))}
+set.seed(seed)
+ks <- 1:8
+km_all <- map(ks, ~ kmeans(X, .x, nstart = 100, iter.max = 50))
+gap_stat <- clusGap(X, kmeans, K.max = max(ks), B = 200, nstart = 50, iter.max = 50)
+```
+
+```{r choose-k-plot, fig.height = 3.8, fig.width = 10, out.width = "100%"}
+k_tab <- tibble(
+  k = ks,
+  wss = map_dbl(km_all, "tot.withinss"),
+  silhouette = c(NA, map_dbl(km_all[-1], ~ mean(silhouette(.x$cluster, D)[, "sil_width"]))),
+  gap = gap_stat$Tab[, "gap"], gap_se = gap_stat$Tab[, "SE.sim"],
+  smallest = map_int(km_all, ~ min(.x$size)))
+
+k_tab %>%
+  select(k, `Within SS (elbow)` = wss, `Average silhouette` = silhouette, `Gap statistic` = gap) %>%
+  pivot_longer(-k) %>%
+  ggplot(aes(k, value)) +
+  geom_line(colour = "grey40") + geom_point(size = 2.5, colour = "#2a6f97") +
+  facet_wrap(~ name, scales = "free_y") +
+  scale_x_continuous(breaks = ks) +
+  labs(title = "Three criteria for the number of clusters", x = "k", y = NULL)
+```
+
+```{r choose-k-rule}
+gap_k <- maxSE(gap_stat$Tab[, "gap"], gap_stat$Tab[, "SE.sim"], method = "Tibs2001SEmax")
+
+# chosen k: best average silhouette among solutions whose smallest cluster has
+# at least 5 districts, so that no "cluster" is just one or two outliers
+k_final <- k_tab %>% filter(k >= 2, smallest >= 5) %>% slice_max(silhouette, n = 1) %>% pull(k)
+
+k_tab %>% mutate(chosen = if_else(k == k_final, "◀", "")) %>%
+  kable(digits = 3, caption = "k-means for k = 1 to 8 (smallest = size of the smallest cluster)")
+```
+
+**Reading the criteria.** The average silhouette stays around `r round(mean(k_tab$silhouette, na.rm = TRUE), 2)` for every k, and the gap statistic's 1-SE rule picks **k = `r gap_k`**. Both say the same thing: New Zealand's districts are **not sharply separated**. They form a continuum, and any clustering is a useful segmentation of it rather than a discovery of natural groups. Within that caveat, we use **k = `r k_final`**: the best silhouette among solutions where every cluster has at least 5 districts.
+
+# k-means
+
+```{r kmeans}
+km <- km_all[[k_final]]
+
+# name the clusters from their centres, so the labels do not depend on
+# k-means' arbitrary numbering
+centres <- as_tibble(km$centers) %>% mutate(cluster = row_number())
+if (k_final == 3) {
+  urban  <- centres$cluster[which.max(centres$share_townhouses + centres$share_apartments)]
+  rest   <- setdiff(centres$cluster, urban)
+  growth <- rest[which.max(centres$per1000[rest])]
+  labels <- set_names(c("Urban multi-unit", "House-building belt", "Regional low-intensity"),
+                      c(urban, growth, setdiff(rest, growth)))
+} else {
+  labels <- set_names(paste("Cluster", seq_len(k_final)), seq_len(k_final))
+}
+prof$cluster <- factor(labels[as.character(km$cluster)], levels = unname(labels))
+clus_cols <- set_names(c("#c1121f", "#2a6f97", "#bc6c25", "#6a4c93", "#2d6a4f")[seq_len(k_final)],
+                       levels(prof$cluster))
+
+cat("Between-cluster share of total variance:", round(km$betweenss / km$totss, 3), "\n")
+count(prof, cluster) %>% kable(caption = "Cluster sizes")
+```
+
+## Who is in each cluster
+
+```{r members}
+prof %>% group_by(cluster) %>%
+  summarise(districts = n(), members = paste(sort(name), collapse = ", ")) %>%
+  kable(caption = "Districts in each k-means cluster")
+```
+
+## What makes each cluster different
+
+```{r centroid-heatmap, fig.height = 4.5}
+prof %>%
+  select(cluster, all_of(feats)) %>%
+  mutate(across(all_of(feats), ~ as.numeric(scale(.x)))) %>%
+  group_by(cluster) %>% summarise(across(everything(), mean)) %>%
+  pivot_longer(-cluster, names_to = "feature", values_to = "z") %>%
+  mutate(feature = factor(feature, levels = rev(feats))) %>%
+  ggplot(aes(cluster, feature, fill = z)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = sprintf("%+.1f", z)), size = 3.5) +
+  scale_fill_gradient2(low = "#2a6f97", mid = "white", high = "#c1121f") +
+  labs(title = "Cluster centres in SD units (red = above the national average)",
+       x = NULL, y = NULL, fill = "z") +
+  theme(legend.position = "right")
+```
+
+```{r profile-table}
+prof %>%
+  group_by(cluster) %>%
+  summarise(districts = n(),
+            `townhouses %` = 100 * median(share_townhouses),
+            `apartments %` = 100 * median(share_apartments),
+            `retirement %` = 100 * median(share_retirement),
+            `real $/m²`    = median(real_m2),
+            `m² per house` = median(m2_per_house),
+            `alterations %` = 100 * median(alt_share),
+            `non-res area %` = 100 * median(nonres_area_share),
+            `growth (×)`   = exp(median(growth)),
+            `dwellings /1,000` = median(per1000)) %>%
+  kable(digits = 1, format.args = list(big.mark = ","),
+        caption = "Cluster medians in original units")
+```
+
+# Hierarchical clustering
+
+Agglomerative clustering merges the two closest groups at every step. **Ward's linkage** merges the pair that adds the least within-cluster variance, which makes it the closest relative of k-means. Complete and average linkage are fitted too, to show how much the linkage choice matters.
+
+```{r hclust}
+hc <- list(Ward     = hclust(D, method = "ward.D2"),
+           Complete = hclust(D, method = "complete"),
+           Average  = hclust(D, method = "average"))
+cuts <- map(hc, cutree, k = k_final)
+```
+
+```{r dendrogram, fig.height = 7, fig.width = 11, out.width = "100%"}
+par(mar = c(1, 4, 3, 1))
+plot(hc$Ward, cex = 0.62, hang = -1, xlab = "", sub = "",
+     main = paste("Ward linkage dendrogram, cut at k =", k_final))
+rect.hclust(hc$Ward, k = k_final, border = "#c1121f")
+```
+
+## Do the methods agree?
+
+The **adjusted Rand index (ARI)** measures how far two partitions agree beyond chance. It is 1 for identical partitions and about 0 for random ones.
+
+```{r agreement}
+ari <- function(a, b) {
+  tab <- table(a, b); n <- sum(tab)
+  s  <- sum(choose(tab, 2))
+  sa <- sum(choose(rowSums(tab), 2)); sb <- sum(choose(colSums(tab), 2))
+  e  <- sa * sb / choose(n, 2)
+  (s - e) / ((sa + sb) / 2 - e)
+}
+
+tibble(method = names(cuts),
+       `ARI with k-means` = map_dbl(cuts, ~ ari(km$cluster, .x)),
+       `cluster sizes` = map_chr(cuts, ~ paste(sort(table(.x), decreasing = TRUE), collapse = " / "))) %>%
+  kable(digits = 3, caption = paste0("Hierarchical partitions (k = ", k_final, ") vs k-means"))
+
+table(`k-means` = prof$cluster, `Ward` = cuts$Ward) %>% kable(caption = "k-means vs Ward, cross-tabulation")
+
+disagree <- prof$name[match(cuts$Ward, unique(cuts$Ward[order(prof$cluster)]))
+                      != match(km$cluster, unique(km$cluster[order(prof$cluster)]))]
+```
+
+Complete and average linkage chain single outliers into their own clusters, which is why their sizes are lopsided. Ward and k-means find essentially the same groups. They disagree only on: `r if (length(disagree)) paste(disagree, collapse = ", ") else "none"`.
+
+# How stable are the clusters?
+
+A cluster that disappears when the data change slightly should not be interpreted. Districts are resampled with replacement 200 times. Each time k-means is refitted, every original district is assigned to its nearest new centre, and the result is compared with the main solution using ARI.
+
+```{r stability, cache = TRUE, cache.extra = file.mtime(derived_file("q2_profiles.rds"))}
+set.seed(seed)
+nearest <- function(X, centers) apply(X, 1, function(r) which.min(colSums((t(centers) - r)^2)))
+boot_ari <- map_dbl(1:200, function(b) {
+  idx <- sample(nrow(X), replace = TRUE)
+  kb  <- kmeans(X[idx, ], k_final, nstart = 25, iter.max = 50)
+  ari(km$cluster, nearest(X, kb$centers))
+})
+```
+
+```{r stability-out, fig.height = 3}
+cat("Bootstrap ARI: median", round(median(boot_ari), 2),
+    "  middle 90%", paste(round(quantile(boot_ari, c(0.05, 0.95)), 2), collapse = " to "), "\n")
+ggplot(tibble(ari = boot_ari), aes(ari)) +
+  geom_histogram(bins = 30, fill = "#2a6f97", colour = "white") +
+  labs(title = "Agreement of bootstrap k-means with the main solution", x = "ARI", y = "Bootstrap samples")
+```
+
+## Which districts are borderline?
+
+```{r silhouette-plot, fig.height = 9, fig.width = 8}
+sil <- silhouette(km$cluster, D)
+prof$sil <- sil[, "sil_width"]
+prof %>%
+  ggplot(aes(sil, reorder(name, sil), fill = cluster)) +
+  geom_col() +
+  facet_grid(cluster ~ ., scales = "free_y", space = "free_y") +
+  scale_fill_manual(values = clus_cols) +
+  labs(title = "Silhouette width by district (negative = closer to another cluster)",
+       x = "Silhouette width", y = NULL, fill = NULL) +
+  theme(axis.text.y = element_text(size = 6.5), strip.text = element_blank())
+```
+
+# A picture of the clusters: principal components
+
+The 10-dimensional profiles are projected onto their first two principal components. Arrows show how each feature loads on them.
+
+```{r pca}
+pc <- prcomp(X)
+ve <- summary(pc)$importance["Proportion of Variance", 1:2]
+cat("PC1 and PC2 explain", round(100 * sum(ve)), "% of the variance\n")
+```
+
+```{r biplot, fig.height = 7.5, fig.width = 10, out.width = "100%"}
+scores <- as_tibble(pc$x[, 1:2]) %>% mutate(name = prof$name, cluster = prof$cluster)
+arrow_scale <- 0.9 * max(abs(pc$x[, 1:2])) / max(abs(pc$rotation[, 1:2]))
+loads <- as_tibble(pc$rotation[, 1:2] * arrow_scale, rownames = "feature")
+
+ggplot(scores, aes(PC1, PC2)) +
+  geom_hline(yintercept = 0, colour = "grey85") + geom_vline(xintercept = 0, colour = "grey85") +
+  geom_segment(data = loads, aes(0, 0, xend = PC1, yend = PC2),
+               arrow = arrow(length = unit(0.18, "cm")), colour = "grey45") +
+  geom_text(data = loads, aes(PC1 * 1.08, PC2 * 1.08, label = feature), colour = "grey30", size = 3.2) +
+  geom_point(aes(colour = cluster), size = 2.6) +
+  geom_text_repel(aes(label = name, colour = cluster), size = 2.7, max.overlaps = 20,
+                  show.legend = FALSE, seed = seed) +
+  scale_colour_manual(values = clus_cols) +
+  scale_x_continuous(expand = expansion(mult = 0.15)) +
+  scale_y_continuous(expand = expansion(mult = 0.08)) +
+  labs(title = "Districts on the first two principal components",
+       x = sprintf("PC1 (%.0f%%)", 100 * ve[1]), y = sprintf("PC2 (%.0f%%)", 100 * ve[2]), colour = NULL)
+```
+
+# Sensitivity: the smallest districts
+
+The Chatham Islands consented only `r prof$dwellings_total[prof$name == "Chatham Islands"]` dwellings in 11 years. Its growth and volatility are therefore mostly noise. We refit k-means without the districts that consented fewer than 100 dwellings over the window, and check whether everyone else keeps their cluster.
+
+```{r sens-small}
+small <- prof$dwellings_total < 100
+cat("Dropped:", paste(prof$name[small], collapse = ", "), "\n")
+Xs <- scale(prof[!small, feats])
+set.seed(seed)
+km_s <- kmeans(Xs, k_final, nstart = 100, iter.max = 50)
+cat("ARI with the main solution (same districts):", round(ari(km$cluster[!small], km_s$cluster), 3), "\n")
+```
+
+# Conclusions
+
+```{r conclusion-numbers, include = FALSE}
+med <- prof %>% group_by(cluster) %>%
+  summarise(n = n(), real = median(real_m2), p1000 = median(per1000),
+            multi = 100 * median(share_townhouses + share_apartments),
+            alt = 100 * median(alt_share), ret = 100 * median(share_retirement))
+g <- function(cl, v) med[[v]][med$cluster == cl]
+```
+
+```{r conclusion-text, results = "asis", echo = FALSE}
+if (k_final == 3) {
+  cat(glue::glue("
+1. **Three types of building market** (k-means, k = 3, confirmed by Ward's linkage with ARI = {round(ari(km$cluster, cuts$Ward), 2)}):
+    - **Urban multi-unit** ({g('Urban multi-unit', 'n')} districts: the main cities plus Queenstown-Lakes). {round(g('Urban multi-unit', 'multi'))}% of new dwellings are townhouses or apartments, and these districts have the highest real cost: a median of ${format(round(g('Urban multi-unit', 'real')), big.mark = ',')}/m².
+    - **House-building belt** ({g('House-building belt', 'n')} districts: commuter belts, lifestyle and retirement destinations). The most building per head ({round(g('House-building belt', 'p1000'), 1)} new dwellings per 1,000 residents a year), mostly stand-alone houses plus a notable retirement-village share ({round(g('House-building belt', 'ret'), 1)}%).
+    - **Regional low-intensity** ({g('Regional low-intensity', 'n')} districts: provincial and rural). Little new building ({round(g('Regional low-intensity', 'p1000'), 1)} per 1,000), the cheapest real $/m², and a larger share of residential spending on alterations ({round(g('Regional low-intensity', 'alt'))}%). They maintain existing housing rather than add to it. Their dwelling counts grew the most between 2015–19 and 2021–25 (median ×{round(exp(median(prof$growth[prof$cluster == 'Regional low-intensity'])), 1)}), but from a very low base.
+
+"))
+}
+cat(glue::glue("
+2. **A continuum, not islands.** The average silhouette is only {round(mean(prof$sil), 2)} and the gap statistic prefers k = {gap_k}. The types are a useful summary, but many districts sit between them (see the silhouette plot).
+3. **Moderately stable.** k-means and Ward's linkage agree closely, and dropping the smallest districts leaves the clusters unchanged (ARI = {round(ari(km$cluster[!small], km_s$cluster), 2)}). Under bootstrap resampling the median ARI is {round(median(boot_ari), 2)}, but the middle 90% runs from {round(quantile(boot_ari, 0.05), 2)} to {round(quantile(boot_ari, 0.95), 2)}. The urban cluster is the clearest; the boundary between the other two is softer. Complete and average linkage are dominated by single outliers, so they are not used for interpretation.
+4. **Inflation.** Cost is compared in {base_period} CGPI dollars. Without deflation, districts that built mostly in the expensive 2022–25 years would look like high-cost markets.
+5. **Limits.** One 11-year window (2015–2025); district boundaries hide variation inside cities; consent values are estimates; clusters describe *how* districts build, not *why*.
+"))
+```
