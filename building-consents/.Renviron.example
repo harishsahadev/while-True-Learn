@@ -1,0 +1,19 @@
+# ---------------------------------------------------------------------------
+# Local data location for the building consents project
+#
+# 1. Copy this file to `.Renviron` in the same folder (building-consents/):
+#        cp .Renviron.example .Renviron
+# 2. Set STAT462_DATA to the folder that holds the Stats NZ CSVs on YOUR
+#    machine. It is searched recursively, so the folder you unzipped the
+#    downloads into is enough (sub-folders are fine).
+# 3. Restart R (RStudio: Session > Restart R). R/config.R also reads this file
+#    directly, so knitting and Rscript work even without a restart.
+#
+# `.Renviron` is git-ignored: your path never goes into the repo.
+# Use forward slashes, also on Windows (C:/Users/you/...). No quotes needed.
+# ---------------------------------------------------------------------------
+
+STAT462_DATA=/path/to/Group 8 Project/Dataset
+
+# Optional: where cleaned tables are written. Default: <STAT462_DATA>/derived
+# STAT462_DERIVED=/path/to/Group 8 Project/Dataset/derived

@@ -1,1 +1,11 @@
 *_cache/
+# R / RStudio
+.Rproj.user/
+.Rhistory
+.RData
+
+# local data path (each person has their own; see building-consents/.Renviron.example)
+.Renviron
+
+# knitr figure copies (the HTML reports are self-contained)
+*_files/
