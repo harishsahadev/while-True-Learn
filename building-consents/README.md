@@ -56,7 +56,7 @@ Building-Consents-Project/
 ├── communication/
 │   ├── make_figures.R                 plain-language figures for the poster and slides
 │   ├── render_pdf.R                   prints poster / slides HTML to PDF (headless Chrome)
-│   ├── poster/                        poster.html → poster.pdf (A2 portrait)
+│   ├── poster/                        poster.html → poster.pdf and editable poster.pptx (A2 portrait)
 │   └── slides/                        build_slides.py → slides.pptx (editable) and slides.pdf
 ├── docs/data_dictionary.md            every column of every processed table
 ├── tools/make_submission_zip.sh       builds the data-free supplementary zip
@@ -122,6 +122,7 @@ as described in `data/raw/README.md`. All column definitions are in `docs/data_d
    python communication/slides/build_slides.py   # slides.pptx and slides.html (needs: pip install python-pptx)
    Rscript communication/render_pdf.R poster     # poster.pdf (needs Chrome + install.packages("chromote"))
    Rscript communication/render_pdf.R slides     # slides.pdf
+   python communication/poster/pptx/build_poster_pptx.py   # poster.pptx, an editable copy of poster.html
    ```
 
    Without `chromote`, open the `.html` in Chrome and use *Print → Save as PDF* (margins none, background graphics on).

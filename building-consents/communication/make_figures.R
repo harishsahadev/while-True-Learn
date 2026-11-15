@@ -73,6 +73,23 @@ p2 <- nz |> pivot_longer(c(nominal, real), names_to = "basis", values_to = "cost
   guides(colour = guide_legend(nrow = 2))
 save_comm(p2, "c02_inflation", w = 9, h = 6)
 
+# poster version: wider and shorter, lines labelled at their ends instead of a legend
+ends2 <- nz |> filter(year %in% range(year))
+rise <- c(nominal = ends2$nominal[2] / ends2$nominal[1], real = ends2$real[2] / ends2$real[1])
+p2b <- nz |> pivot_longer(c(nominal, real), names_to = "basis", values_to = "cost") |>
+  ggplot(aes(year, cost, colour = basis)) +
+  geom_line(linewidth = 1.6, show.legend = FALSE) +
+  annotate("text", x = 2026, y = max(nz$real) + 180, hjust = 1, vjust = 0, size = 7.5, fontface = "bold", colour = pal["coral"],
+           label = paste0("real dollars: up ", round(100 * (rise["real"] - 1)), "%")) +
+  annotate("text", x = 2026, y = 480, hjust = 1, size = 7.5, fontface = "bold", colour = "#8C7B6A",
+           label = paste0("each year's dollars: ", sprintf("%.1f", rise["nominal"]), " times")) +
+  scale_colour_manual(values = c(nominal = "#B9AA9A", real = unname(pal["coral"]))) +
+  scale_x_continuous(breaks = seq(1990, 2020, 10), limits = c(1990, 2026)) +
+  scale_y_continuous(labels = scales::dollar, limits = c(330, 3800), breaks = c(1000, 2000, 3000)) +
+  labs(x = NULL, y = NULL) +
+  theme(axis.text = element_text(size = 26))
+save_comm(p2b, "c02b_inflation_poster", w = 10, h = 3.5)
+
 # ---- 3. RQ1: how accurate are the predictions? ---------------------------------
 t1 <- tab("rq1", "t09_test_results")
 acc1 <- tribble(~label, ~model, ~set,

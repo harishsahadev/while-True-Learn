@@ -21,7 +21,7 @@
   body { width: 420mm; height: 594mm; font-family: "Open Sauce One", Arial, sans-serif; color: var(--ink);
          font-size: 11.5pt; line-height: 1.28;
          background: url("../assets/pitch_background.png") top left / 100% 100% no-repeat, #FDEBD3; }
-  .poster { position: relative; width: 420mm; height: 594mm; padding: 10mm 12mm 9mm; display: flex; flex-direction: column; gap: 5mm; overflow: hidden; }
+  .poster { position: relative; width: 420mm; height: 594mm; padding: 10mm 12mm 9mm; display: flex; flex-direction: column; gap: 4mm; overflow: hidden; }
 
   /* header, after the pitch deck's title slide */
   .topline { display: flex; justify-content: space-between; align-items: center; font-size: 12pt; }
@@ -51,17 +51,15 @@
   img { display: block; width: 100%; height: auto; }
   .muted { color: var(--muted); }
 
+  .card .fig { margin-bottom: 2.5mm; }
+  .fighead { font-size: 10.5pt; font-weight: 700; margin-bottom: 1mm; }
   .card { background: var(--card); border: 1pt solid var(--border); border-radius: 4mm; padding: 4.5mm 5.5mm; }
   .row3 { display: grid; grid-template-columns: 1.15fr 1fr 1.1fr; gap: 5mm; }
-  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 3mm; margin: 1mm 0 3mm; }
-  .tile { background: var(--tint); border: 1pt solid var(--border); border-radius: 3mm; padding: 2.2mm 3mm; }
-  .tile .n { font-size: 20pt; font-weight: 800; color: var(--dark); line-height: 1.05; }
-  .tile .l { font-size: 10pt; color: var(--muted); }
   table.methods { width: 100%; border-collapse: collapse; font-size: 10.5pt; }
   table.methods th { background: var(--orange); text-align: left; padding: 1.6mm 2mm; font-weight: 700; }
   table.methods td { padding: 1.6mm 2mm; border-top: 1pt solid var(--border); vertical-align: top; }
 
-  .band { display: grid; grid-template-columns: 118mm 1fr 1fr; grid-template-rows: auto auto; column-gap: 5mm; row-gap: 3mm; }
+  .band { display: grid; grid-template-columns: 130mm 1fr 1fr; grid-template-rows: auto auto; column-gap: 5mm; row-gap: 3mm; }
   .band .text { grid-row: 1 / 3; font-size: 11pt; }
   .band .text li { margin-bottom: 0.5mm; }
   .chip { display: inline-block; font-weight: 700; font-size: 11pt; padding: 1mm 3.2mm; border-radius: 10mm; margin-bottom: 2mm; }
@@ -114,17 +112,15 @@
     </div>
     <div class="card">
       <h2>Data</h2>
-      <div class="tiles">
-        <div class="tile"><div class="n">10.4M</div><div class="l">rows across 13 Stats NZ tables (Aug 2026 release)</div></div>
-        <div class="tile"><div class="n">67</div><div class="l">districts, monthly from April 1990</div></div>
-        <div class="tile"><div class="n">9,715</div><div class="l">district-quarters after aggregation</div></div>
-        <div class="tile"><div class="n">×4.7 → +20%</div><div class="l">rise in cost per square metre, 1991–2025: nominal vs real</div></div>
-      </div>
+      <p>13 Stats NZ tables (August 2026 release) with 10.4 million rows: 67 districts, monthly from
+         April 1990, which we aggregated to 9,715 district-quarters.</p>
+      <div class="fig"><div class="fighead">Most of the rise in cost is inflation, so we use June-2026 dollars throughout</div>
+        <img src="../../outputs/figures/communication/c02b_inflation_poster.png" alt="New-house cost per square metre in nominal and real dollars, 1991 to 2025"></div>
       <h3>Preparation</h3>
       <ul>
-        <li>Reshaped to one row per district and quarter (RQ1) or year (RQ3)</li>
-        <li>2010 GST change removed; deflated to June-2026 dollars (Capital Goods Price Index)</li>
-        <li>Quarters with under 5 new houses not modelled; no feature uses house value</li>
+        <li>One row per district and quarter (RQ1) or year (RQ3)</li>
+        <li>2010 GST change removed; adjusted with the Capital Goods Price Index</li>
+        <li>Quarters with under 5 new houses left out; no feature uses house value</li>
       </ul>
     </div>
     <div class="card">
