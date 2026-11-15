@@ -1,0 +1,650 @@
+---
+title: "Q1: What drives the real cost per m² of new houses across districts?"
+subtitle: "Inflation, linear models, resampling and tree-based methods on Stats NZ building consents"
+author: "while True: learn() · Group 8 · STAT462"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+---
+
+```{r setup, include = FALSE}
+Sys.setenv(LANG = "en")
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, fig.align = "center",
+                      out.width = "80%", fig.width = 8, fig.height = 4.5)
+
+# all paths come from config.R (see building-consents/README.md, "Linking the data")
+source("../config.R")
+
+library(tidyverse)
+library(knitr)
+library(glmnet)
+library(rpart)
+library(rpart.plot)
+library(ranger)
+library(gbm)
+set.seed(seed)
+
+theme_set(theme_minimal(base_size = 12) + theme(legend.position = "top"))
+model_cols <- c(Linear = "#2a6f97", Lasso = "#61a5c2", Tree = "#bc6c25",
+                Bagging = "#dda15e", Forest = "#c1121f", Boosting = "#6a4c93")
+```
+
+**Question.** Across New Zealand's 67 districts, what is associated with the cost per square metre of new houses, once construction-price inflation is removed?
+
+**Unit.** One district × quarter. **Response:** log of *real* consented value per m² of new houses. **Split:** train 1996–2019, test 2020 Q1–2026 Q2, by time. The answers are associations, not causes.
+
+The frame comes from `R/scripts/02_clean.R` and `R/scripts/03_features.R`. Run those first.
+
+```{r load}
+dat <- readRDS(derived_file("q1_frame.rds"))
+base_period <- attr(dat, "base_period")
+
+# only districts present in both train and test, so every model can predict every row
+common <- intersect(dat$area[dat$split == "train"], dat$area[dat$split == "test"])
+dropped <- setdiff(levels(dat$area), common)
+cat("Districts dropped (in only one of train/test):", paste(dropped, collapse = ", "), "\n")
+dat <- dat %>% filter(area %in% common) %>% mutate(area = droplevels(area))
+
+train <- dat %>% filter(split == "train")
+test  <- dat %>% filter(split == "test")
+
+tibble(split = c("train", "test"),
+       rows = c(nrow(train), nrow(test)),
+       districts = c(n_distinct(train$area), n_distinct(test$area)),
+       years = c(paste(range(train$year), collapse = "–"), paste(range(test$year), collapse = "–"))) %>%
+  kable(caption = paste0("Modelling frame (district-quarters with ≥ ", min_houses,
+                         " new houses; dollars of ", base_period, ")"))
+```
+
+# Inflation: why the response is in real dollars
+
+Consent values are nominal and include GST. Each quarter's $/m² is divided by the Capital Goods Price Index for residential buildings (Stats NZ series `CEPQ.S61101`), which converts it to `r base_period` dollars:
+
+$$\text{real \$/m}^2_{d,q} = \frac{\text{Value}_{d,q}}{\text{Floor area}_{d,q}} \times \frac{\text{CGPI}_{\text{`r base_period`}}}{\text{CGPI}_q}$$
+
+```{r inflation-plot, fig.height = 5.5}
+national <- dat %>%
+  group_by(year) %>%
+  summarise(Nominal = median(dollars_per_m2), Real = median(real_m2),
+            cgpi_growth = mean(cgpi_growth_lag1), .groups = "drop")
+
+national %>%
+  pivot_longer(c(Nominal, Real), names_to = "dollars", values_to = "m2") %>%
+  ggplot(aes(year, m2, colour = dollars)) +
+  geom_vline(xintercept = train_end_year + 0.5, linetype = "dashed", colour = "grey50") +
+  annotate("text", x = train_end_year + 0.7, y = 1200, label = "test →", hjust = 0, colour = "grey40") +
+  geom_line(linewidth = 1.1) +
+  scale_colour_manual(values = c(Nominal = "grey55", Real = "#c1121f")) +
+  scale_y_continuous(labels = scales::dollar) +
+  labs(title = with(national, sprintf("Nominal $/m² rose %.1f× since %d; real $/m² only %+.0f%%",
+                                      last(Nominal) / first(Nominal), first(year),
+                                      100 * (last(Real) / first(Real) - 1))),
+       subtitle = paste0("Median district-quarter, new houses. Real = ", base_period, " dollars (CGPI)"),
+       x = NULL, y = "$ per m²", colour = NULL)
+```
+
+```{r inflation-r2}
+r2_year <- function(y) summary(lm(y ~ factor(dat$year)))$r.squared
+growth_pa <- function(y) {
+  b <- coef(lm(y ~ time_trend, data = dat))[["time_trend"]]
+  100 * (exp(b) - 1)
+}
+infl_tab <- tibble(
+  response = c("log nominal $/m²", "log real $/m² (CGPI)"),
+  `variance explained by year alone` = c(r2_year(dat$log_nom_m2), r2_year(dat$log_real_m2)),
+  `trend growth, % per year` = c(growth_pa(dat$log_nom_m2), growth_pa(dat$log_real_m2)))
+kable(infl_tab, digits = 3, caption = "What year alone explains, nominal vs real")
+```
+
+In nominal dollars, the year alone explains `r round(100 * infl_tab[[2]][1])`% of the variance. A model of nominal cost would mostly be learning inflation. After deflation the year explains `r round(100 * infl_tab[[2]][2])`%, so the remaining variation is where district and building differences can show.
+
+**Inflation as a feature.** Deflation removes the price *level*, but the *rate* of inflation can still matter. Consent values are the applicant's estimate at application time. When costs rise fast, those estimates may lag behind. So the models get `cgpi_growth_lag1`: CGPI growth over the year to the previous quarter. It is known before the quarter starts, so it does not leak the response.
+
+```{r cgpi-growth, fig.height = 3.5}
+national %>%
+  ggplot(aes(year, 100 * cgpi_growth)) +
+  geom_col(fill = "#6a4c93") +
+  geom_vline(xintercept = train_end_year + 0.5, linetype = "dashed", colour = "grey50") +
+  labs(title = "Construction-cost inflation spiked in 2021–22, inside the test period",
+       x = NULL, y = "CGPI growth, % (year to previous quarter)")
+```
+
+The training years never saw inflation above `r round(100 * max(train$cgpi_growth_lag1), 1)`%, but the test period reaches `r round(100 * max(test$cgpi_growth_lag1), 1)`%. That is an extrapolation problem, and Section 5 returns to it.
+
+# Simple linear regression
+
+We start with two single predictors on the training data: time, and house size.
+
+```{r slr}
+slr_fit <- function(y, x) {
+  m <- lm(reformulate(x, y), data = train)
+  s <- summary(m)
+  tibble(response = y, predictor = x,
+         slope = coef(m)[[2]], se = s$coefficients[2, 2],
+         `95% CI` = paste(round(confint(m)[2, ], 4), collapse = " to "),
+         r2 = s$r.squared)
+}
+slr <- bind_rows(slr_fit("log_nom_m2", "time_trend"),
+                 slr_fit("log_real_m2", "time_trend"),
+                 slr_fit("log_real_m2", "m2_per_house"))
+kable(slr, digits = 4, caption = "Simple linear regressions, training data")
+```
+
+```{r slr-plots, fig.height = 4}
+p_dat <- train %>%
+  select(time_trend, m2_per_house, log_real_m2) %>%
+  pivot_longer(c(time_trend, m2_per_house), names_to = "predictor", values_to = "x")
+ggplot(p_dat, aes(x, log_real_m2)) +
+  geom_point(alpha = 0.12, size = 0.8) +
+  geom_smooth(method = "lm", colour = "#c1121f", se = TRUE) +
+  facet_wrap(~ predictor, scales = "free_x") +
+  labs(title = "One predictor at a time (training data)", x = NULL, y = "log real $/m²")
+```
+
+- **Time.** In nominal terms, cost per m² grows about `r round(100 * (exp(slr$slope[1]) - 1), 1)`% a year. In real terms it grows `r round(100 * (exp(slr$slope[2]) - 1), 2)`% a year. Inflation accounts for almost all of the nominal trend.
+- **House size.** Each extra m² of average house size is associated with a `r round(100 * slr$slope[3], 3)`% change in real $/m², with R² = `r round(slr$r2[3], 3)`. One predictor explains little on its own, which motivates the multiple regression.
+
+# Multiple linear regression
+
+## Feature sets
+
+```{r sets}
+feat_core <- c("multi_unit_share", "m2_per_house", "log_houses", "nonres_area_share",
+               "per1000_lag1", "dw_growth", "log_dw_trail4", "sa2_top3_share")
+
+sets <- list(
+  "A: building & market"   = feat_core,
+  "B: A + time"            = c(feat_core, "time_trend", "quarter_f"),
+  "B+I: B + inflation"     = c(feat_core, "time_trend", "quarter_f", "cgpi_growth_lag1"),
+  "C: B+I + district"      = c(feat_core, "time_trend", "quarter_f", "cgpi_growth_lag1", "area")
+)
+main_set <- "B+I: B + inflation"
+```
+
+Set **B+I** is the main explanatory model: building profile, local market, time and inflation. Set **C** adds the district identity. It absorbs everything permanent about a place, so it is the strongest predictor but explains the least.
+
+## Fit and diagnostics
+
+Numeric predictors are standardised with *training* means and SDs, so each coefficient is the change in log real $/m² for a 1-SD change in that predictor.
+
+```{r standardise}
+num_feats <- c(feat_core, "time_trend", "cgpi_growth_lag1")
+mu  <- map_dbl(train[num_feats], mean)
+sdv <- map_dbl(train[num_feats], sd)
+standardise <- function(d) { for (n in num_feats) d[[n]] <- (d[[n]] - mu[[n]]) / sdv[[n]]; d }
+train_s <- standardise(train)
+test_s  <- standardise(test)
+
+m_mlr <- lm(reformulate(sets[[main_set]], "log_real_m2"), data = train_s)
+cat("R² =", round(summary(m_mlr)$r.squared, 3),
+    "  adj R² =", round(summary(m_mlr)$adj.r.squared, 3),
+    "  residual SE =", round(summary(m_mlr)$sigma, 3), "\n")
+```
+
+```{r diagnostics, fig.height = 7, fig.width = 8}
+par(mfrow = c(2, 2))
+plot(m_mlr, pch = 16, cex = 0.4, col = adjustcolor("black", 0.3))
+par(mfrow = c(1, 1))
+```
+
+**Reading the diagnostics.** The four standard checks:
+
+- **Residuals vs fitted:** is there curvature that the linear terms miss?
+- **Normal Q–Q plot:** are the tails heavy? Small districts produce occasional extreme quarters.
+- **Scale–location plot:** is the spread constant across fitted values?
+- **Leverage:** are any district-quarters unusually influential?
+
+The log response already shrinks the right skew of the raw $/m².
+
+**Collinearity (VIF).** Each VIF below is 1 / (1 − R²) from regressing one predictor on all the others.
+
+```{r vif}
+vif_tab <- map_dfr(num_feats, function(v) {
+  r2 <- summary(lm(reformulate(setdiff(c(num_feats, "quarter_f"), v), v), data = train_s))$r.squared
+  tibble(predictor = v, VIF = 1 / (1 - r2))
+}) %>% arrange(desc(VIF))
+kable(vif_tab, digits = 2, caption = "Variance inflation factors (above 5 deserves a comment)")
+```
+
+## Extending the linear model: curvature, interaction, inflation
+
+The models below are nested. They are compared with partial F-tests (`anova`) and with time-blocked cross-validation (CV) RMSE. With about 5,000 rows almost any term is "significant", so the CV error is the more honest guide.
+
+```{r folds}
+# five consecutive blocks of training years; each held out once
+train_years <- sort(unique(train$year))
+year_block  <- tibble(year = train_years, fold = cut(seq_along(train_years), 5, labels = FALSE))
+foldid <- train %>% left_join(year_block, by = "year") %>% pull(fold)
+
+cv_lm <- function(f, d = train_s) {
+  e <- map_dbl(1:5, function(k) {
+    m <- lm(f, data = d[foldid != k, ])
+    mean((d$log_real_m2[foldid == k] - predict(m, d[foldid == k, ]))^2)
+  })
+  sqrt(mean(e))
+}
+
+f_B    <- reformulate(sets[["B: A + time"]], "log_real_m2")
+f_BI   <- update(f_B, . ~ . + cgpi_growth_lag1)
+f_poly <- update(f_BI, . ~ . + I(time_trend^2))
+f_int  <- update(f_poly, . ~ . + multi_unit_share:time_trend + m2_per_house:time_trend)
+
+nested <- list("B (time, linear)" = f_B, "B + inflation" = f_BI,
+               "+ time²" = f_poly, "+ type-mix × time, size × time" = f_int)
+fits_nested <- map(nested, ~ lm(.x, data = train_s))
+
+av <- do.call(anova, unname(fits_nested))
+tibble(model = names(nested),
+       df_resid = av$Res.Df,
+       F = av$F,
+       p_value = av$`Pr(>F)`,
+       cv_rmse = map_dbl(nested, cv_lm),
+       test_rmse = map_dbl(fits_nested, ~ sqrt(mean((test_s$log_real_m2 - predict(.x, test_s))^2)))) %>%
+  kable(digits = c(0, 0, 1, 4, 4, 4), caption = "Nested linear models: F-tests, blocked-CV RMSE and test RMSE")
+```
+
+# Model comparison
+
+Six methods are fitted to every feature set. All tuning uses the time-blocked folds above, never the test years:
+
+| Method | Tuning |
+|---|---|
+| Linear regression | none |
+| Lasso | λ by blocked CV, 1-SE rule |
+| Regression tree | cost-complexity pruning by blocked CV, 1-SE rule |
+| Bagging | random forest with `mtry` = all predictors |
+| Random forest | `mtry` × node size grid by blocked CV |
+| Boosting (`gbm`) | depth × number of trees by blocked CV |
+
+```{r fit-function}
+rmse <- function(y, p) sqrt(mean((y - p)^2))
+mae  <- function(y, p) mean(abs(y - p))
+oos_r2 <- function(y, p, ybar) 1 - sum((y - p)^2) / sum((y - ybar)^2)
+
+fit_set <- function(feats, tr, te, tr_s, te_s, fid, response = "log_real_m2",
+                    models = names(model_cols)) {
+  f   <- reformulate(feats, response)
+  y   <- tr[[response]]
+  out <- list(feats = feats)
+  P   <- tibble(.row = seq_len(nrow(te)))
+  cols <- c(response, feats)
+
+  if ("Linear" %in% models) {
+    out$lm <- lm(f, data = tr_s); P$Linear <- predict(out$lm, te_s)
+  }
+  if ("Lasso" %in% models) {
+    x_tr <- model.matrix(f, tr_s)[, -1, drop = FALSE]
+    x_te <- model.matrix(f, te_s)[, -1, drop = FALSE]
+    out$lasso <- cv.glmnet(x_tr, y, alpha = 1, foldid = fid)
+    P$Lasso <- as.numeric(predict(out$lasso, x_te, s = "lambda.1se"))
+  }
+  if ("Tree" %in% models) {
+    full <- rpart(f, data = tr, control = rpart.control(cp = 0.0005, minsplit = 30,
+                                                        minbucket = 10, xval = fid))
+    cpt <- as.data.frame(full$cptable); b <- which.min(cpt$xerror)
+    out$cp <- cpt$CP[which(cpt$xerror <= cpt$xerror[b] + cpt$xstd[b])[1]]
+    out$tree <- prune(full, cp = out$cp); P$Tree <- predict(out$tree, te)
+  }
+  p <- length(feats)
+  rf <- function(d, mtry, node, imp = "none")
+    ranger(f, data = d[, cols], num.trees = 400, mtry = mtry, min.node.size = node,
+           importance = imp, respect.unordered.factors = "order", seed = seed)
+  if ("Bagging" %in% models) {
+    out$bag <- rf(tr, p, 5); P$Bagging <- predict(out$bag, te)$predictions
+  }
+  if ("Forest" %in% models) {
+    grid <- expand.grid(mtry = unique(pmax(1, round(c(1/3, 1/2, 2/3) * p))), node = c(5, 20))
+    cv <- map_dbl(seq_len(nrow(grid)), function(i) sqrt(mean(map_dbl(1:5, function(k) {
+      m <- rf(tr[fid != k, ], grid$mtry[i], grid$node[i])
+      mean((y[fid == k] - predict(m, tr[fid == k, ])$predictions)^2)
+    }))))
+    out$rf_par <- grid[which.min(cv), ]
+    out$rf <- rf(tr, out$rf_par$mtry, out$rf_par$node, imp = "permutation")
+    P$Forest <- predict(out$rf, te)$predictions
+  }
+  if ("Boosting" %in% models) {
+    n_max <- 3000; steps <- seq(100, n_max, by = 100)
+    gb <- function(d, depth, n = n_max)
+      gbm(f, data = d[, cols], distribution = "gaussian", n.trees = n,
+          interaction.depth = depth, shrinkage = 0.01, n.minobsinnode = 10,
+          bag.fraction = 0.7, verbose = FALSE)
+    cv <- map_dfr(c(2, 4), function(depth) {
+      err <- map(1:5, function(k) {
+        m <- gb(tr[fid != k, ], depth)
+        colMeans((y[fid == k] - predict(m, tr[fid == k, ], n.trees = steps))^2)
+      })
+      tibble(depth = depth, n.trees = steps, cv = sqrt(Reduce(`+`, err) / 5))
+    })
+    out$gbm_par <- cv[which.min(cv$cv), ]
+    out$gbm <- gb(tr, out$gbm_par$depth, out$gbm_par$n.trees)
+    P$Boosting <- predict(out$gbm, te, n.trees = out$gbm_par$n.trees)
+  }
+  out$preds <- P %>% select(-.row)
+  out
+}
+```
+
+```{r fit-all, cache = TRUE, cache.extra = file.mtime(derived_file("q1_frame.rds"))}
+set.seed(seed)
+fits <- map(sets, ~ fit_set(.x, train, test, train_s, test_s, foldid))
+```
+
+## Test performance (2020–2026)
+
+There are two baselines. **Training mean** predicts the 1996–2019 average everywhere. **Persistence** predicts the district's last observed real $/m². That is a strong benchmark, because it uses the recent actual values, which the feature models never see.
+
+```{r results}
+ybar <- mean(train$log_real_m2)
+persist <- coalesce(test$last_log_real_m2, ybar)
+
+score <- function(p, set, model) tibble(feature_set = set, model = model,
+  rmse = rmse(test$log_real_m2, p), mae = mae(test$log_real_m2, p),
+  r2 = oos_r2(test$log_real_m2, p, ybar))
+
+results <- imap_dfr(fits, function(fit, s)
+  imap_dfr(fit$preds, ~ score(.x, s, .y))) %>%
+  mutate(feature_set = factor(feature_set, levels = names(sets)),
+         model = factor(model, levels = names(model_cols)))
+
+baselines <- bind_rows(score(rep(ybar, nrow(test)), "baseline", "Training mean"),
+                       score(persist, "baseline", "Persistence (last quarter)"))
+
+bind_rows(baselines, mutate(results, across(c(feature_set, model), as.character))) %>%
+  mutate(`≈ % error` = 100 * (exp(rmse) - 1)) %>%
+  kable(digits = 3, caption = "Test error (log real $/m²). RMSE 0.10 ≈ predictions about 10% off")
+```
+
+```{r results-plot, fig.height = 5}
+ggplot(results, aes(model, rmse, fill = feature_set)) +
+  geom_col(position = position_dodge(0.85), width = 0.8) +
+  geom_hline(data = baselines, aes(yintercept = rmse, linetype = model), colour = "grey30") +
+  scale_fill_manual(values = c("#d9d9d9", "#9ecae1", "#3182bd", "#08519c")) +
+  labs(title = "Test RMSE by method and feature set",
+       subtitle = "Lines: baselines", x = NULL, y = "RMSE, log real $/m²",
+       fill = NULL, linetype = NULL) +
+  guides(fill = guide_legend(nrow = 2), linetype = guide_legend(nrow = 2))
+```
+
+```{r tuning}
+imap_dfr(fits, ~ tibble(feature_set = .y,
+  lasso_lambda_1se = .x$lasso$lambda.1se,
+  lasso_kept = sum(coef(.x$lasso, s = "lambda.1se")[-1] != 0),
+  tree_leaves = sum(.x$tree$frame$var == "<leaf>"),
+  rf_mtry = .x$rf_par$mtry, rf_node = .x$rf_par$node,
+  gbm_depth = .x$gbm_par$depth, gbm_trees = .x$gbm_par$n.trees)) %>%
+  kable(digits = 4, caption = "Hyperparameters chosen by time-blocked CV")
+```
+
+## What inflation adds
+
+```{r inflation-effect}
+results %>%
+  filter(feature_set %in% c("B: A + time", "B+I: B + inflation")) %>%
+  select(feature_set, model, rmse) %>%
+  pivot_wider(names_from = feature_set, values_from = rmse) %>%
+  mutate(change = .[[3]] - .[[2]]) %>%
+  kable(digits = 4, caption = "Test RMSE without and with the inflation feature (negative = better)")
+```
+
+**Reading this table.** In the linear models, inflation has a stable *negative* association: quarters that follow fast construction-cost inflation have lower real $/m² (see the bootstrap CI in Section 6). This fits consent values lagging behind rising costs. On the test set it helps the linear models and the lasso a little. It does not help the tree-based models, and the forest gets worse: they split on inflation values up to the training maximum, so they cannot use the unseen 2021–22 spike.
+
+# Where the models fail: the 2021–22 inflation shock
+
+Trees, bagging, forests and boosting can only predict values inside the training range of each feature. The test years bring higher costs and record inflation. The plot below compares the mean test residual each year with construction inflation.
+
+```{r residuals-by-year, fig.height = 6}
+res_year <- fits[[main_set]]$preds %>%
+  mutate(year = test$year, y = test$log_real_m2) %>%
+  pivot_longer(-c(year, y), names_to = "model", values_to = "pred") %>%
+  group_by(year, model) %>%
+  summarise(value = mean(y - pred), .groups = "drop") %>%
+  mutate(panel = "Mean test residual (actual − predicted)")
+
+infl_year <- test %>% group_by(year) %>%
+  summarise(value = mean(cgpi_growth_lag1)) %>%
+  mutate(panel = "CGPI growth (year to previous quarter)")
+
+ggplot() +
+  geom_hline(yintercept = 0, colour = "grey60") +
+  geom_line(data = res_year, aes(year, value, colour = model), linewidth = 1) +
+  geom_col(data = infl_year, aes(year, value), fill = "#6a4c93", alpha = 0.7) +
+  facet_wrap(~ panel, ncol = 1, scales = "free_y") +
+  scale_colour_manual(values = model_cols) +
+  labs(title = paste("Test residuals by year vs construction inflation,", main_set),
+       x = NULL, y = NULL, colour = NULL)
+```
+
+```{r resid-infl-cor}
+res_year %>% left_join(select(infl_year, year, infl = value), by = "year") %>%
+  group_by(model) %>%
+  summarise(`corr(mean residual, inflation)` = cor(value, infl)) %>%
+  kable(digits = 2, caption = "Do yearly errors move with inflation? (7 test years: indicative only)")
+```
+
+**Reading the plot.** The main error pattern is the *time trend*, not the inflation spike itself:
+
+- **Linear models** extend the 1996–2019 real rise of about 1% a year. Real costs flattened after 2020, so the linear models over-predict more each year (negative residuals that grow).
+- **Tree-based methods** cannot predict above the training range, so they under-predict throughout (positive residuals).
+
+With only seven test years, the correlations above mostly reflect these opposite drifts, and should not be read as evidence about inflation.
+
+# Bootstrap
+
+District-quarters from the same district are correlated, so the usual i.i.d. bootstrap would understate the uncertainty. Instead we resample **whole districts** with replacement (a cluster bootstrap).
+
+## Confidence intervals for the linear coefficients
+
+```{r boot-coef, cache = TRUE, cache.extra = file.mtime(derived_file("q1_frame.rds"))}
+set.seed(seed)
+B <- 500
+districts <- levels(train_s$area)
+by_d <- split(train_s, train_s$area)
+f_main <- reformulate(sets[[main_set]], "log_real_m2")
+
+boot_coefs <- map_dfr(1:B, function(b) {
+  d <- bind_rows(by_d[sample(districts, replace = TRUE)])
+  enframe(coef(lm(f_main, data = d)), "term", "estimate")
+})
+```
+
+```{r boot-coef-table}
+ols <- summary(m_mlr)$coefficients
+boot_ci <- boot_coefs %>%
+  filter(term %in% num_feats) %>%
+  group_by(term) %>%
+  summarise(boot_lo = quantile(estimate, 0.025, na.rm = TRUE),
+            boot_hi = quantile(estimate, 0.975, na.rm = TRUE),
+            boot_se = sd(estimate, na.rm = TRUE)) %>%
+  mutate(estimate = ols[term, "Estimate"], ols_se = ols[term, "Std. Error"],
+         `zero inside boot CI` = boot_lo < 0 & boot_hi > 0) %>%
+  select(term, estimate, ols_se, boot_se, boot_lo, boot_hi, `zero inside boot CI`) %>%
+  arrange(desc(abs(estimate)))
+kable(boot_ci, digits = 3, caption = paste0("Standardised coefficients, ", main_set,
+      ": OLS SE vs district-cluster bootstrap (B = 500), 95% percentile CI"))
+```
+
+When the bootstrap SE is much larger than the OLS SE, the textbook OLS intervals are too narrow for data grouped by district.
+
+## Is the best model really better?
+
+```{r boot-rmse}
+set.seed(seed)
+main_preds <- fits[[main_set]]$preds
+best <- results %>% filter(feature_set == main_set) %>% slice_min(rmse, n = 1) %>% pull(model) %>% as.character()
+
+sse_by_d <- tibble(area = test$area, y = test$log_real_m2,
+                   best = main_preds[[best]], Linear = main_preds$Linear, persist = persist) %>%
+  group_by(area) %>%
+  summarise(n = n(), sse_best = sum((y - best)^2), sse_lin = sum((y - Linear)^2),
+            sse_per = sum((y - persist)^2))
+
+boot_diff <- map_dfr(1:2000, function(b) {
+  s <- sse_by_d[sample(nrow(sse_by_d), replace = TRUE), ]
+  tibble(vs_linear  = sqrt(sum(s$sse_best) / sum(s$n)) - sqrt(sum(s$sse_lin) / sum(s$n)),
+         vs_persist = sqrt(sum(s$sse_best) / sum(s$n)) - sqrt(sum(s$sse_per) / sum(s$n)))
+})
+
+boot_diff %>%
+  pivot_longer(everything(), names_to = "comparison") %>%
+  group_by(comparison) %>%
+  summarise(mean_diff = mean(value), lo = quantile(value, 0.025), hi = quantile(value, 0.975),
+            `P(best is better)` = mean(value < 0)) %>%
+  mutate(comparison = recode(comparison, vs_linear = paste(best, "− Linear"),
+                             vs_persist = paste(best, "− Persistence"))) %>%
+  kable(digits = 4, caption = paste0("Test RMSE difference, ", main_set,
+        ", district-cluster bootstrap (B = 2,000). Negative = ", best, " better"))
+```
+
+# What drives the cost
+
+The interpretation uses set **`r main_set`**.
+
+## Linear model and lasso
+
+```{r coef-plot, fig.height = 5}
+boot_ci %>%
+  mutate(term = fct_reorder(term, estimate)) %>%
+  ggplot(aes(estimate, term)) +
+  geom_vline(xintercept = 0, colour = "grey60") +
+  geom_errorbarh(aes(xmin = boot_lo, xmax = boot_hi), height = 0.25, colour = "#2a6f97") +
+  geom_point(size = 2.5, colour = "#2a6f97") +
+  labs(title = "Change in log real $/m² per 1-SD change in each feature",
+       subtitle = "Linear model; bars are 95% district-cluster bootstrap CIs",
+       x = "Standardised coefficient", y = NULL)
+```
+
+```{r lasso-coefs}
+lc <- coef(fits[[main_set]]$lasso, s = "lambda.1se")
+tibble(term = rownames(lc), coefficient = as.numeric(lc)) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(kept = coefficient != 0) %>%
+  arrange(desc(abs(coefficient))) %>%
+  kable(digits = 4, caption = "Lasso coefficients at lambda.1se (0 = dropped)")
+```
+
+## Regression tree
+
+```{r tree-plot, fig.width = 11, fig.height = 6, out.width = "100%"}
+rpart.plot(fits[[main_set]]$tree, type = 4, extra = 101, under = TRUE, faclen = 0, cex = 0.65,
+           main = "Pruned regression tree (log real $/m²)")
+```
+
+## Random forest and boosting
+
+```{r importance, fig.height = 5}
+imp <- bind_rows(
+  tibble(feature = names(fits[[main_set]]$rf$variable.importance),
+         value = fits[[main_set]]$rf$variable.importance, method = "Forest (permutation)"),
+  summary(fits[[main_set]]$gbm, plotit = FALSE) %>%
+    transmute(feature = as.character(var), value = rel.inf, method = "Boosting (relative influence)")
+) %>%
+  group_by(method) %>% mutate(value = value / max(value)) %>% ungroup()
+
+ggplot(imp, aes(value, fct_reorder(feature, value, .fun = max), fill = method)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c("#6a4c93", "#c1121f")) +
+  labs(title = "Feature importance, scaled to the top feature = 1", x = NULL, y = NULL, fill = NULL)
+```
+
+```{r pdp, fig.width = 10, fig.height = 4}
+top3 <- imp %>% filter(method == "Forest (permutation)", feature %in% num_feats) %>%
+  slice_max(value, n = 3) %>% pull(feature)
+base_rows <- train[sample(nrow(train), 1000), ]
+pdp <- map_dfr(top3, function(v) {
+  g <- seq(quantile(train[[v]], 0.02), quantile(train[[v]], 0.98), length.out = 25)
+  tibble(feature = v, x = g, y = map_dbl(g, function(val) {
+    d <- base_rows; d[[v]] <- val
+    mean(predict(fits[[main_set]]$rf, d)$predictions)
+  }))
+})
+ggplot(pdp, aes(x, exp(y))) +
+  geom_line(colour = "#c1121f", linewidth = 1.1) +
+  facet_wrap(~ feature, scales = "free_x") +
+  scale_y_continuous(labels = scales::dollar) +
+  labs(title = "Partial dependence: shape of each top feature's effect (random forest)",
+       x = "Feature value", y = paste("Predicted real $/m² (", base_period, "$)"))
+```
+
+## Do the methods agree?
+
+```{r agreement}
+f_main_feats <- fits[[main_set]]$feats
+lasso_imp <- map_dbl(f_main_feats, ~ max(c(0, abs(lc[startsWith(rownames(lc), .x), 1]))))
+tree_vi   <- fits[[main_set]]$tree$variable.importance
+gbm_vi    <- summary(fits[[main_set]]$gbm, plotit = FALSE)
+gbm_vi    <- set_names(gbm_vi$rel.inf, gbm_vi$var)
+
+tibble(feature = f_main_feats,
+       Lasso    = lasso_imp,
+       Tree     = coalesce(tree_vi[f_main_feats], 0),
+       Forest   = fits[[main_set]]$rf$variable.importance[f_main_feats],
+       Boosting = coalesce(gbm_vi[f_main_feats], 0)) %>%
+  mutate(across(-feature, ~ rank(-.x, ties.method = "min"))) %>%
+  mutate(mean_rank = rowMeans(across(-feature))) %>%
+  arrange(mean_rank) %>%
+  kable(digits = 1, caption = "Importance rank by method (1 = most important)")
+```
+
+# Sensitivity checks
+
+## A different deflator
+
+The response is rebuilt with a second index, the producer price index for residential building construction outputs (`PPIQ.SQUEE1120`). If the conclusions depend on which deflator is used, they are fragile.
+
+```{r sens-ppi, cache = TRUE, cache.extra = file.mtime(derived_file("q1_frame.rds"))}
+fit_ppi <- fit_set(sets[[main_set]], train, test, train_s, test_s, foldid,
+                   response = "log_real_m2_ppi", models = c("Linear", "Forest"))
+```
+
+```{r sens-ppi-table}
+cat("Correlation of the two real responses:", round(cor(dat$log_real_m2, dat$log_real_m2_ppi), 3), "\n")
+tibble(term = num_feats,
+       `CGPI coef` = coef(fits[[main_set]]$lm)[num_feats],
+       `PPI coef`  = coef(fit_ppi$lm)[num_feats],
+       `CGPI forest rank` = rank(-fits[[main_set]]$rf$variable.importance)[num_feats],
+       `PPI forest rank`  = rank(-fit_ppi$rf$variable.importance)[num_feats]) %>%
+  arrange(`CGPI forest rank`) %>%
+  kable(digits = 3, caption = "Coefficients and forest importance ranks under the two deflators")
+```
+
+## Without Auckland
+
+Auckland is a single territorial authority, and it dominates national volume.
+
+```{r sens-akl, cache = TRUE, cache.extra = file.mtime(derived_file("q1_frame.rds"))}
+keep_tr <- train$area != "Auckland"; keep_te <- test$area != "Auckland"
+fid_na  <- foldid[keep_tr]
+fit_na  <- fit_set(sets[[main_set]],
+                   mutate(train[keep_tr, ], area = droplevels(area)), test[keep_te, ],
+                   mutate(train_s[keep_tr, ], area = droplevels(area)), test_s[keep_te, ],
+                   fid_na, models = c("Linear", "Forest"))
+```
+
+```{r sens-akl-table}
+y_na <- test$log_real_m2[keep_te]
+tibble(model = c("Linear", "Forest"),
+       `all districts` = c(rmse(test$log_real_m2, fits[[main_set]]$preds$Linear),
+                           rmse(test$log_real_m2, fits[[main_set]]$preds$Forest)),
+       `without Auckland` = c(rmse(y_na, fit_na$preds$Linear), rmse(y_na, fit_na$preds$Forest))) %>%
+  kable(digits = 4, caption = "Test RMSE with and without Auckland")
+```
+
+# Conclusions
+
+```{r conclusion-numbers, include = FALSE}
+r <- function(s, m) results$rmse[results$feature_set == s & results$model == m]
+best_overall <- results %>% slice_min(rmse, n = 1)
+best_main    <- results %>% filter(feature_set == main_set) %>% slice_min(rmse, n = 1)
+```
+
+*The numbers below fill in automatically. The interpretation sentences should be re-read whenever the data or settings change.*
+
+1. **Inflation first.** In nominal dollars the year alone explains `r round(100 * infl_tab[[2]][1])`% of the variance, and only `r round(100 * infl_tab[[2]][2])`% in real dollars. Modelling real $/m² is what makes Q1 a question about districts and buildings rather than about the price level.
+2. **Best predictor.** The best model overall is **`r best_overall$model`** on **`r best_overall$feature_set`**, with test RMSE `r round(best_overall$rmse, 3)` (about `r round(100 * (exp(best_overall$rmse) - 1))`% error). The training-mean baseline is `r round(baselines$rmse[1], 3)` and persistence is `r round(baselines$rmse[2], 3)`. On the explanatory set (`r main_set`), the best model is `r best_main$model` (`r round(best_main$rmse, 3)`).
+3. **What drives it (August 2026 release).** Every method ranks **time** first: real costs drift upward even after deflation. Next come **recent local building activity** (dwellings consented in the previous year) and **dwellings per 1,000 residents**. Busier markets build at higher real $/m². The number of houses *in the quarter* has a negative linear coefficient, which hints at economies of scale. But it is strongly collinear with recent activity (VIF above 10), so the pair should be read together. Type mix, house size and SA2 concentration have bootstrap CIs that include zero, so we do not claim them.
+4. **Place matters.** Adding the district identity moves the Forest RMSE from `r round(r(main_set, "Forest"), 3)` to `r round(r("C: B+I + district", "Forest"), 3)`. That is the part of the cost gap explained by *where*, beyond the measured building and market profile.
+5. **Inflation, in two roles.** As a *deflator*, it is essential (point 1), and the results hold under a second deflator (PPI: same top-4 ranking). As a *feature*, past construction inflation has a small, stable negative association with real $/m². It changes Linear test RMSE by `r round(r(main_set, "Linear") - r("B: A + time", "Linear"), 4)` and Forest RMSE by `r round(r(main_set, "Forest") - r("B: A + time", "Forest"), 4)`. The test errors are dominated by trend extrapolation: linear models over-predict, and tree-based models cannot exceed the training range.
+6. **An honest benchmark.** Persistence (`r round(baselines$rmse[2], 3)`) beats every model without the district, and the bootstrap confirms that gap. A district's recent cost is a better short-term predictor than its building profile. That supports point 4: cost is largely a stable property of the place.
+7. **Limits.** These are associations, not causes. Consent values are the applicant's estimates, not final costs. All dollars are in `r base_period` CGPI dollars and include GST. The data is one frozen release (August 2026). Districts with fewer than `r min_houses` houses in a quarter are excluded.
