@@ -56,6 +56,7 @@ roc_points <- function(y, p) {
 # Same idea as cv_tune() in utils_models.R, with classification metrics.
 # fit_predict(train_df, new_df, params) returns predicted probabilities of y = 1
 # (a vector), or a matrix with one column per value of an "inner" setting.
+# Inner values are rounded to 6 significant figures so they match across folds.
 # Settings are ranked by mean CV AUC (higher is better).
 cv_tune_class <- function(fit_predict, grid, data, folds, response, inner = NULL) {
   grid <- as_tibble(grid)
@@ -70,7 +71,7 @@ cv_tune_class <- function(fit_predict, grid, data, folds, response, inner = NULL
       obs  <- data[[response]][f$valid]
       map_dfr(colnames(pred), function(cn)
         class_metrics(obs, pred[, cn]) |>
-          mutate(config = g, inner_value = as.numeric(cn), fold = fn))
+          mutate(config = g, inner_value = signif(as.numeric(cn), 6), fold = fn))
     })
   })
 

@@ -50,6 +50,9 @@ make_time_folds <- function(years,
 #   * a matrix with one column per value of an "inner" setting that one fit can
 #     produce for free (lambda for glmnet, number of rounds for xgboost). The
 #     column names hold that setting's value and `inner` names it.
+#     The values are rounded to 6 significant figures before grouping: going
+#     through column names (text) can change the last digits, and then the
+#     same lambda would not match across folds.
 # grid: data frame, one row per combination of settings to try.
 # Returns list(folds = per-fold scores, summary = mean score per setting,
 #              best = the setting with the lowest mean RMSE).
@@ -67,7 +70,7 @@ cv_tune <- function(fit_predict, grid, data, folds, response, inner = NULL) {
       obs  <- data[[response]][f$valid]
       map_dfr(colnames(pred), function(cn)
         reg_metrics(obs, pred[, cn]) |>
-          mutate(config = g, inner_value = as.numeric(cn), fold = fn, n_valid = length(obs)))
+          mutate(config = g, inner_value = signif(as.numeric(cn), 6), fold = fn, n_valid = length(obs)))
     })
   })
 

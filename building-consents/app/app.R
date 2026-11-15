@@ -11,7 +11,6 @@ library(bslib)
 suppressPackageStartupMessages({
   library(tidyverse)
   library(ranger)
-  library(glmnet)
   library(plotly)
 })
 
@@ -27,7 +26,7 @@ find_proj_root <- function(path = getwd()) {
 }
 proj_root <- find_proj_root()
 source(file.path(proj_root, "R", "utils_data.R"))
-source(file.path(proj_root, "R", "utils_models.R"))      # make_x()
+source(file.path(proj_root, "R", "utils_models.R"))
 path_of <- function(...) file.path(proj_root, ...)
 addResourcePath("figs", path_of("outputs", "figures"))   # serve the notebook figures to the browser
 addResourcePath("assets", path_of("communication", "assets"))   # pitch-deck font and background
@@ -60,8 +59,7 @@ rq1_newdata <- function(row, inp) {
            region = factor(region, levels = fm1$factor_levels$region))
 }
 rq1_predict <- function(nd) {
-  ridge <- fm1$ridge_district
-  c(ridge  = as.numeric(predict(ridge$fit, make_x(nd, ridge$rhs), s = ridge$lambda)),
+  c(linear = as.numeric(predict(fm1$lm_district$fit, newdata = nd)),
     forest = predict(fm1$rf_drivers, nd)$predictions)
 }
 
@@ -148,8 +146,8 @@ ui <- page_navbar(
            card_body(fig_img("figs/communication/c04_rq1_drivers.png", "What makes a district dearer"),
                      strong("What drives the cost per m² of new houses?"),
                      p("Location matters most. Of the measured drivers, renovation spending (+8% to +11%) and fast
-                        population growth raise cost. The drivers explain about a fifth of the gap between districts.
-                        Best model: ridge regression with district, within about 8% of actual cost in 2020–26."))),
+                        population growth raise cost. The drivers explain about 15% of the gap between districts.
+                        Best model: linear regression with district, within about 8% of actual cost in 2020–26."))),
       card(card_header("RQ2 · Clustering"),
            card_body(fig_img("figs/communication/c05_rq2_markets.png", "Three kinds of building market"),
                      strong("What kinds of building markets are there?"),
@@ -184,8 +182,8 @@ ui <- page_navbar(
       ),
       layout_columns(
         col_widths = c(4, 4, 4, 12, 6, 6),
-        value_box(title = "Predicted cost (ridge, with district)", value = textOutput("v_ridge"),
-                  p(textOutput("v_ridge_rel", inline = TRUE)), theme = "primary"),
+        value_box(title = "Predicted cost (linear regression, with district)", value = textOutput("v_linear"),
+                  p(textOutput("v_linear_rel", inline = TRUE)), theme = "primary"),
         value_box(title = "Predicted cost (random forest, drivers only)", value = textOutput("v_rf"),
                   p(textOutput("v_rf_rel", inline = TRUE)), theme = "secondary"),
         value_box(title = "Actual, last four quarters", value = textOutput("v_actual"),
@@ -300,8 +298,8 @@ server <- function(input, output, session) {
     p <- rq1_predict(rq1_newdata(row1(), inp))
     list(rel = p, dollars = exp(p) * row1()$loo_cost_m2)
   })
-  output$v_ridge     <- renderText(paste0(dollars(pred1()$dollars["ridge"]), " / m²"))
-  output$v_ridge_rel <- renderText(paste(pct(exp(pred1()$rel["ridge"]) - 1), "vs the rest of NZ"))
+  output$v_linear     <- renderText(paste0(dollars(pred1()$dollars["linear"]), " / m²"))
+  output$v_linear_rel <- renderText(paste(pct(exp(pred1()$rel["linear"]) - 1), "vs the rest of NZ"))
   output$v_rf        <- renderText(paste0(dollars(pred1()$dollars["forest"]), " / m²"))
   output$v_rf_rel    <- renderText(paste(pct(exp(pred1()$rel["forest"]) - 1), "vs the rest of NZ"))
   output$v_actual    <- renderText(paste0(dollars(row1()$real_cost_m2), " / m²"))

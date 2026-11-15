@@ -16,7 +16,7 @@ interactive Shiny app.
 
 | | Question | Methods | Finding |
 |---|---|---|---|
-| **RQ1** | What drives the **real cost per m²** of new houses across districts? | Baselines, linear and polynomial regression, ridge / lasso / elastic net, GAM, regression tree, random forest, XGBoost, SVM | Location matters most. Renovation spending (+8% to +11%) and fast growth raise cost; the measured drivers explain about a fifth of the gap between districts. Ridge regression with the district predicts 2020–2026 within 7.9% (MAPE). |
+| **RQ1** | What drives the **real cost per m²** of new houses across districts? | Baselines, linear and polynomial regression, ridge / lasso / elastic net, GAM, regression tree, random forest, XGBoost, SVM | Location matters most. Renovation spending (+8% to +11%) and fast growth raise cost; the measured drivers explain about 15% of the gap between districts. Linear regression with the district predicts 2020–2026 within 7.9% (MAPE). |
 | **RQ2** | What kinds of **building markets** does New Zealand have? | k-means and hierarchical clustering (four linkages); five criteria for *k*; bootstrap stability | Three markets: house-building districts (30), slow provincial districts (21) and urban medium-density markets (15). The two methods agree on 60 of 66 districts, but the separation is weak: a summary of a continuum. |
 | **RQ3** | Will a district's consents **rise or fall** next year? | Baselines, logistic regression, lasso, LDA, QDA, classification tree, KNN, random forest | Only modestly predictable: logistic regression is right 58% of the time (AUC 0.63), against 53% for the best simple rule. Districts follow the national cycle. |
 

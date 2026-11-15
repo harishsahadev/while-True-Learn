@@ -208,24 +208,24 @@ els += [card(8.2, 1.75, 4.65, 5.05),
             [run("Renovation spending", 16, True), run(" is the strongest sign: wealthy, busy markets build dearer houses", 16)],
             [run("Fast-growing places", 16, True), run(" cost more, especially where renovation is also high", 16)],
             [run("Volume builders", 16, True), run(" make high-building districts cheaper, but any district gets dearer in its busy years", 16)],
-            [run("Location still matters most: ", 16, True), run("these factors explain about a fifth of the gap; Queenstown is still about 15% dearer", 16)]], size=16)]
+            [run("Location still matters most: ", 16, True), run("these factors explain only about 15% of the gap; Queenstown is still the dearest district after them", 16)]], size=16)]
 slides.append(dict(presenter="harish", topic="RQ1 · Cost per square metre", els=els,
     notes="Harish: The strongest sign of a dear district is renovation spending: places where people renovate a lot are "
-          "wealthy, busy markets, and new houses there cost about nine percent more. Fast growth adds cost too. Building lots "
+          "wealthy, busy markets, and new houses there cost about ten percent more. Fast growth adds cost too. Building lots "
           "of houses makes a district cheaper, thanks to volume builders, but any one district gets dearer in its own busy "
-          "years. Still, location matters most: these factors explain only about a fifth of the gap, and Queenstown is still "
-          "about fifteen percent dearer after them."))
+          "years. Still, location matters most: these factors explain only about fifteen percent of the gap, and Queenstown is still "
+          "the dearest district even after them."))
 
 # 6. RQ1 accuracy
 els = title("How well can we predict cost?", "Average error on 2020–2026, years the models never saw")
 els += fig_card("c03_rq1_accuracy.png", 0.5, 2.15, 7.7, 4.65)
 els += [card(8.4, 2.15, 4.45, 1.95)]
-els += stat(8.7, 2.27, 4.0, "7.9%", "average error of our best model (ridge regression with the district)")
+els += stat(8.7, 2.27, 4.0, "7.9%", "average error of our best model (linear regression with the district)")
 els += text_card(8.4, 4.3, 4.45, 2.5, "Simple beat fancy",
                  "A straight-line model matched boosted trees and support vector machines. But knowing each district's own "
                  "history already gets you to 8.0%.")
 slides.append(dict(presenter="harish", topic="RQ1 · Cost per square metre", els=els,
-    notes="Harish: Guessing the national average is off by about ten percent. Our best model, a ridge regression that knows "
+    notes="Harish: Guessing the national average is off by about ten percent. Our best model, a plain linear regression that knows "
           "the district, is off by 7.9 percent on years it never saw. Two lessons: simple beat fancy, and each district's own "
           "history already gets you to eight percent, so place is most of the story. Andrew will now show the markets we "
           "found."))
@@ -293,7 +293,7 @@ slides.append(dict(presenter="niwesh", topic="RQ3 · Next year", els=els,
           "until it looks better."))
 
 # 11. Conclusion
-take = [("Place matters most", "Our measured factors explain about a fifth of why some districts cost more to build in."),
+take = [("Place matters most", "Our measured factors explain only about 15% of why some districts cost more to build in."),
         ("Three soft-edged markets", "House-building, slow provincial and urban medium-density."),
         ("The national cycle rules", "Next year's direction is only a little better than a coin toss.")]
 els = title("What we learned")
@@ -324,7 +324,7 @@ rows = [["", "RQ1 Cost per square metre", "RQ2 Markets", "RQ3 Next year"],
         ["Methods", "Baselines, linear, polynomial, ridge, lasso, elastic net, GAM, regression tree, random forest, XGBoost, SVM",
          "k-means; hierarchical (single, complete, average, Ward)", "Logistic, lasso, LDA, QDA, classification tree, KNN, random forest"],
         ["Validation", "Forward-chaining CV; test 2020–26", "Silhouette, CH, gap, bootstrap stability", "Forward-chaining CV (AUC); test 2017–24"],
-        ["Result", "Ridge: MAPE 7.9%, R-squared 0.36", "k = 3; ARI 0.75 between methods", "Logistic: 58% accuracy, AUC 0.63"]]
+        ["Result", "Linear regression: MAPE 7.9%, R-squared 0.36", "k = 3; ARI 0.75 between methods", "Logistic: 58% accuracy, AUC 0.63"]]
 els = title("Appendix: methods and references")
 cw = [1.6, 3.95, 3.35, 3.45]; y0 = 1.75
 els.append(card(0.5, y0 - 0.1, 12.35, 3.75))

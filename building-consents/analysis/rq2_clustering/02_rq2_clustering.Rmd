@@ -354,7 +354,7 @@ profile |>
    (Thames-Coromandel, Kāpiti Coast, Tasman, Central Otago), and growing rural service towns (Ashburton,
    Marlborough).
 2. **Slow provincial districts** (21 districts). The lowest building intensity (3.1 per 1,000), almost no
-   townhouses, apartments or retirement units, the most volatile building, the largest non-residential share
+   apartments or retirement units (their townhouse share, 12%, is similar to the house-building districts' 9%), the most volatile building, the largest non-residential share
    (39%), the smallest houses (177 m²) and the cheapest construction (−8%). They are small (a median of under 500
    new dwellings in ten years). Building did pick up in 2021–2026 (+21%), but from a low base.
 3. **Urban medium-density markets** (15 districts). A third of new dwellings are townhouses, flats or units, and

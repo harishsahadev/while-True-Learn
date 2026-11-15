@@ -1,7 +1,7 @@
-feature,label,"Random forest, drivers","Ridge, drivers","Ridge, district"
-log_resid_alt_real,Residential alterations ($ per quarter),7.8868763581538825,10.896622212320239,7.332088471066589
-dwell_per_1000,"New dwellings per 1,000 residents",2.7384213092799037,6.011743272994208,0.799404199670195
-log_houses_n,New houses in the quarter,-0.04972807606898888,-5.219088084681934,5.189951402682502
-rel_house_m2,House size vs rest of NZ,-1.1146617607100229,-1.5833401476024744,-1.674764283079988
-log_nonres_real,New non-residential work ($ per quarter),-0.7640101910062702,0.17843852667271953,0.3255099477962542
-houses_yoy,Houses vs same quarter last year,-1.010922905330125,-0.4319187891415055,-1.8584202707529585
+feature,label,"Random forest, drivers","Linear, drivers","Linear, district"
+log_resid_alt_real,Residential alterations ($ per quarter),7.8868763581538825,11.423372250147379,7.503572332697073
+dwell_per_1000,"New dwellings per 1,000 residents",2.7384213092799037,6.092819677577355,0.5369824422975844
+log_houses_n,New houses in the quarter,-0.04972807606898888,-5.560578537922933,5.994797174840172
+rel_house_m2,House size vs rest of NZ,-1.1146617607100229,-1.5996449506604282,-1.5975320010857663
+log_nonres_real,New non-residential work ($ per quarter),-0.7640101910062702,0.1781396201430141,0.3904287324730138
+houses_yoy,Houses vs same quarter last year,-1.010922905330125,-0.38434120322253795,-1.9718590223099741

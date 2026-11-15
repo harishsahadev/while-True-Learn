@@ -79,9 +79,9 @@ acc1 <- tribble(~label, ~model, ~set,
   "Guess the national average", "Overall mean", "none",
   "Each district's own past average", "District mean", "none",
   "Best model, measured drivers only", "SVM (radial)", "drivers",
-  "Best model, drivers + district", "Ridge", "district") |>
+  "Best model, drivers + district", "Linear regression", "district") |>
   left_join(t1 |> select(model, set, test_mape), by = c("model", "set")) |>
-  mutate(label = fct_inorder(label), best = model == "Ridge")
+  mutate(label = fct_inorder(label), best = model == "Linear regression")
 p3 <- ggplot(acc1, aes(test_mape, fct_rev(label), fill = best)) +
   geom_col(width = 0.65) +
   geom_text(aes(label = sprintf("%.1f%%", 100 * test_mape)), hjust = -0.15, size = 6.5, fontface = "bold",
@@ -96,7 +96,7 @@ save_comm(p3, "c03_rq1_accuracy", w = 10, h = 5)
 # ---- 4. RQ1: what drives cost ----------------------------------------------------
 e1 <- tab("rq1", "t12_effect_sizes")
 drv <- e1 |>
-  transmute(feature, effect = (`Random forest, drivers` + `Ridge, drivers`) / 2) |>
+  transmute(feature, effect = (`Random forest, drivers` + `Linear, drivers`) / 2) |>
   mutate(label = recode(feature,
     log_resid_alt_real = "Renovation spending in the district",
     dwell_per_1000     = "New homes per 1,000 residents",

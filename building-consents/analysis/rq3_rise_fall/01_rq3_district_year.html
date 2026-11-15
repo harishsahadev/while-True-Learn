@@ -11,7 +11,7 @@
 
 <meta name="author" content="while True: learn(), Group 8, STAT462" />
 
-<meta name="date" content="2026-11-07" />
+<meta name="date" content="2026-11-15" />
 
 <title>RQ3 Step 1: The district-year table, the label and the features</title>
 
@@ -1572,7 +1572,7 @@ label and the features</h1>
 <h3 class="subtitle">Will a district’s consents rise or fall next
 year?</h3>
 <h4 class="author">while True: learn(), Group 8, STAT462</h4>
-<h4 class="date">2026-11-07</h4>
+<h4 class="date">2026-11-15</h4>
 
 </div>
 
@@ -2383,6 +2383,9 @@ make_time_folds &lt;- function(years,
 #   * a matrix with one column per value of an &quot;inner&quot; setting that one fit can
 #     produce for free (lambda for glmnet, number of rounds for xgboost). The
 #     column names hold that setting&#39;s value and `inner` names it.
+#     The values are rounded to 6 significant figures before grouping: going
+#     through column names (text) can change the last digits, and then the
+#     same lambda would not match across folds.
 # grid: data frame, one row per combination of settings to try.
 # Returns list(folds = per-fold scores, summary = mean score per setting,
 #              best = the setting with the lowest mean RMSE).
@@ -2400,7 +2403,7 @@ cv_tune &lt;- function(fit_predict, grid, data, folds, response, inner = NULL) {
       obs  &lt;- data[[response]][f$valid]
       map_dfr(colnames(pred), function(cn)
         reg_metrics(obs, pred[, cn]) |&gt;
-          mutate(config = g, inner_value = as.numeric(cn), fold = fn, n_valid = length(obs)))
+          mutate(config = g, inner_value = signif(as.numeric(cn), 6), fold = fn, n_valid = length(obs)))
     })
   })
 
@@ -2523,6 +2526,7 @@ roc_points &lt;- function(y, p) {
 # Same idea as cv_tune() in utils_models.R, with classification metrics.
 # fit_predict(train_df, new_df, params) returns predicted probabilities of y = 1
 # (a vector), or a matrix with one column per value of an &quot;inner&quot; setting.
+# Inner values are rounded to 6 significant figures so they match across folds.
 # Settings are ranked by mean CV AUC (higher is better).
 cv_tune_class &lt;- function(fit_predict, grid, data, folds, response, inner = NULL) {
   grid &lt;- as_tibble(grid)
@@ -2537,7 +2541,7 @@ cv_tune_class &lt;- function(fit_predict, grid, data, folds, response, inner = N
       obs  &lt;- data[[response]][f$valid]
       map_dfr(colnames(pred), function(cn)
         class_metrics(obs, pred[, cn]) |&gt;
-          mutate(config = g, inner_value = as.numeric(cn), fold = fn))
+          mutate(config = g, inner_value = signif(as.numeric(cn), 6), fold = fn))
     })
   })
 

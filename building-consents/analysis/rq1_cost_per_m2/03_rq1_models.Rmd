@@ -390,17 +390,17 @@ p_lasso <- ggplot(lasso_curve, aes(log10(lambda), cv_rmse, colour = set)) +
 save_fig(p_lasso, "fig16_lasso_cv_curve", height = 3.6)
 ```
 
-**Observation.** The curve is flat at small λ (≈ OLS), dips slightly at a small penalty, then rises steeply once
-the penalty starts removing useful features. Results by feature set:
+**Observation.** The curve is flat at small λ (≈ OLS), then rises steeply once the penalty starts removing useful
+features. Results by feature set:
 
-* **Drivers set** (~25 columns after dummies): the best penalty improves CV RMSE only from
-  `r round(res_ols$drivers$best$cv_rmse, 4)` to `r round(res_lasso$drivers$best$cv_rmse, 4)`, which is within one standard
-  error. With 5,000 rows OLS is not over-fitting much.
-* **District set** (~74 columns): the gain is larger (`r round(res_ols$district$best$cv_rmse, 4)` →
-  `r round(res_lasso$district$best$cv_rmse, 4)`). The penalty pulls the noisy effects of small districts towards the
-  average. Shrinkage is designed for this situation.
+* **Drivers set** (~25 columns after dummies): the best λ is the smallest one tried, so the penalty does not help at
+  all (CV RMSE `r round(res_lasso$drivers$best$cv_rmse, 4)`, the same as OLS). With 5,000 rows and few columns, OLS is
+  not over-fitting.
+* **District set** (~74 columns): a small penalty helps a little (`r round(res_ols$district$best$cv_rmse, 4)` →
+  `r round(res_lasso$district$best$cv_rmse, 4)`) by pulling the noisy effects of small districts towards the average.
+  The gain is well inside one standard error (`r round(res_lasso$district$best$cv_rmse_sd / 2, 4)`).
 
-Ridge, elastic net and lasso end up almost identical.
+Ridge, elastic net and lasso end up almost identical, and close to plain OLS.
 
 # Generalised additive model (GAM)
 
@@ -689,14 +689,15 @@ chosen |> select(set, model, best_settings, cv_rmse)  |> kable(digits = 4, capti
    * XGBoost `r round(cvv("XGBoost", "drivers"), 4)`;
    * SVM `r round(cvv("SVM (radial)", "drivers"), 4)`.
 
-   They are ahead of the whole linear family (`r round(cvv("Lasso", "drivers"), 4)`–`r round(cvv("Linear regression", "drivers"), 4)`).
+   They are ahead of the whole linear family (`r round(cvv("Polynomial regression", "drivers"), 4)`–`r round(cvv("Linear regression", "drivers"), 4)`).
    They explain about a third of the variation in relative cost (CV R² ≈ `r round(cvv("SVM (radial)", "drivers", "cv_r2"), 2)`),
    versus about a quarter for the linear models. The measured drivers matter in a non-linear, interacting way.
    **But no drivers-only model clearly beats the district-mean baseline** (`r round(cvv("District mean", "none"), 4)`).
    Our measured features recover about as much as simply knowing the district, and no more.
-2. **Drivers + district.** Here the order flips: the **penalised linear models are best**
-   (lasso `r round(cvv("Lasso", "district"), 4)`, R² `r round(cvv("Lasso", "district", "cv_r2"), 2)`). Forests and single
-   trees fall behind. Once each district has its own level, what is left is mostly additive and close to linear.
+2. **Drivers + district.** Here the order flips: the **linear models are best**
+   (lasso `r round(cvv("Lasso", "district"), 4)`, plain linear regression `r round(cvv("Linear regression", "district"), 4)`,
+   R² about `r round(cvv("Linear regression", "district", "cv_r2"), 2)`). XGBoost and the SVM are level with them, while
+   forests and single trees fall behind. Once each district has its own level, what is left is mostly additive and close to linear.
    These models beat the district-mean baseline by about
    `r fmt_pct(1 - cvv("Lasso", "district") / cvv("District mean", "none"), 0)` in RMSE. The drivers explain movements
    *around* each district's usual level.
@@ -1003,9 +1004,9 @@ list.files(paths$models_rq1)
 
 | # | Finding | Consequence |
 |---|---|---|
-| 1 | With drivers only, the flexible models (forest, XGBoost, SVM) beat the linear family: CV R² ≈ 0.32 vs 0.25. | The drivers act non-linearly and in combination. |
+| 1 | With drivers only, the flexible models (forest, XGBoost, SVM) beat the linear family: CV R² ≈ 0.32 vs 0.23–0.25. | The drivers act non-linearly and in combination. |
 | 2 | No drivers-only model clearly beats "each district's own average" (CV or test). | Our measured features capture roughly what location captures, not more. Part of the location effect remains unexplained (land, terrain, local costs). |
-| 3 | With the district added, penalised linear models are best (CV R² ≈ 0.42), and they beat the district mean. | The drivers explain movements around each district's usual level, and mostly additively. |
+| 3 | With the district added, linear models are best (CV R² ≈ 0.38–0.39), and they beat the district mean. The penalty adds little, so the 1-SE rule keeps plain linear regression. | The drivers explain movements around each district's usual level, and mostly additively. |
 | 4 | Main drivers: alteration spending (+), region, dwellings per 1,000 residents (+), number of new houses (−), house size (−). | This is the answer to "what drives" for the report. Step 4 will show the shapes. |
 | 5 | Every model is worse in 2020–26, the baseline included. | The test years were unusually dispersed (COVID, boom, bust). The ranking mostly held. |
 | 6 | On real $/m², trees flatten and linear trends overshoot. | Confirms the relative response as the main RQ1 target. |

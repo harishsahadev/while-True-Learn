@@ -78,11 +78,11 @@ XGBoost, tuned by time-ordered cross-validation and tested once on 2020–2026.
 
 * **Location matters most.** Of the measured drivers, residential renovation spending (a sign of a wealthy, busy
   market) has the largest effect: `r ef1("log_resid_alt_real", "Random forest, drivers")` to
-  `r ef1("log_resid_alt_real", "Ridge, drivers")` from a low to a high value.
+  `r ef1("log_resid_alt_real", "Linear, drivers")` from a low to a high value.
 * Fast population growth also raises cost, mostly in the fastest-growing places.
-* The drivers explain about a fifth of the differences between districts.
-* The best model, ridge regression including the district, predicts 2020–2026 cost per m² within about
-  `r p0(t1v("Ridge", "district", "test_mape"))` (mean absolute percentage error). That is only marginally better than
+* The drivers explain about 15% of the differences between districts.
+* The chosen model, linear regression including the district, predicts 2020–2026 cost per m² within about
+  `r p0(t1v("Linear regression", "district", "test_mape"))` (mean absolute percentage error). That is only marginally better than
   each district's own historical average.
 
 **RQ2 (clustering): What kinds of building markets does New Zealand have?** k-means and hierarchical clustering of
@@ -248,15 +248,17 @@ Table \@ref(tab:tab-rq1) and Figure \@ref(fig:fig-cv1) show three results:
 * **Drivers only:** the flexible models (random forest, XGBoost, SVM) explain about a third of the variation (CV R²
   ≈ `r r2d(cv1v("SVM (radial)", "drivers", "cv_r2"))`), against about a quarter for the linear models. So the drivers act
   non-linearly and interact. But none clearly beats simply predicting each district's own average.
-* **Drivers + district:** the penalised linear models are best (CV R² ≈ `r r2d(cv1v("Lasso", "district", "cv_r2"))`).
-  Once each district has its own level, the remaining effects are close to additive and linear.
+* **Drivers + district:** the linear models are best (CV R² ≈ `r r2d(cv1v("Lasso", "district", "cv_r2"))` for the
+  lasso and `r r2d(cv1v("Linear regression", "district", "cv_r2"))` for plain linear regression). Penalising the
+  coefficients gained less than one standard error. Once each district has its own level, the remaining effects
+  are close to additive and linear.
 * **Test years:** every model is worse than in cross-validation, the baselines included. Relative costs were more
-  spread out during the COVID period and the 2021–22 boom. The chosen ridge model's MAPE is
-  `r p1(t1v("Ridge", "district", "test_mape"))`, against `r p1(t1v("District mean", "none", "test_mape"))` for the
+  spread out during the COVID period and the 2021–22 boom. The chosen linear model's MAPE is
+  `r p1(t1v("Linear regression", "district", "test_mape"))`, against `r p1(t1v("District mean", "none", "test_mape"))` for the
   district mean.
 
-The one-standard-error rule chose a **random forest** for the drivers set and **ridge regression** for the district
-set.
+The one-standard-error rule chose a **random forest** for the drivers set and plain **linear regression** for the
+district set.
 
 ```{r fig-importance, fig.cap = "Variable importance from three models (drivers set): lasso standardised coefficients, random-forest permutation importance and XGBoost gain. Colour shows the direction in the lasso."}
 include_graphics(fig_path("rq1", "fig22_variable_importance"))
@@ -270,7 +272,7 @@ include_graphics(fig_path("rq1", "fig24_partial_dependence"))
 \@ref(fig:fig-importance)). Partial dependence (Figure \@ref(fig:fig-pdp)) shows how each one changes the prediction:
 
 * **Residential alteration spending** has the largest effect in every model:
-  `r ef1("log_resid_alt_real", "Random forest, drivers")` to `r ef1("log_resid_alt_real", "Ridge, drivers")` from the
+  `r ef1("log_resid_alt_real", "Random forest, drivers")` to `r ef1("log_resid_alt_real", "Linear, drivers")` from the
   10th to the 90th percentile. It marks wealthier markets with busy trades.
 * **New dwellings per 1,000 residents** raises cost gradually (`r ef1("dwell_per_1000", "Random forest, drivers")` in
   the forest), with a further jump of about 4% in the fastest-growing tenth of district-quarters. It also interacts
@@ -278,16 +280,16 @@ include_graphics(fig_path("rq1", "fig24_partial_dependence"))
   low (Appendix B).
 * **Number of new houses** has opposite effects between and within districts. For the same alteration spending,
   districts that build many houses are cheaper per m² (volume builders, large subdivisions such as Selwyn). But any
-  one district is dearer in its own busier quarters (`r ef1("log_houses_n", "Ridge, district")` in the district
+  one district is dearer in its own busier quarters (`r ef1("log_houses_n", "Linear, district")` in the district
   model).
 * **House size, non-residential work and the dwelling mix** each move the prediction by about 2% or less.
 
-```{r fig-premium, fig.cap = "Each district's premium relative to the average district, before (raw average) and after accounting for the measured drivers (ridge, district set). Ten dearest and ten cheapest after drivers."}
+```{r fig-premium, fig.cap = "Each district's premium relative to the average district, before (raw average) and after accounting for the measured drivers (linear regression, district set). Ten dearest and ten cheapest after drivers."}
 include_graphics(fig_path("rq1", "fig26_district_premium"))
 ```
 
-**How much of location the drivers explain.** In the district-set ridge model, each district's coefficient is the
-part of its cost the drivers do not explain. The drivers explain only about a fifth of the variance between district
+**How much of location the drivers explain.** In the district-set linear model, each district's coefficient is the
+part of its cost the drivers do not explain. The drivers explain only about 15% of the variance between district
 averages (Figure \@ref(fig:fig-premium)):
 
 * Queenstown-Lakes remains about 15% dearer than the average district even after its drivers.
@@ -300,7 +302,7 @@ include_graphics(fig_path("rq1", "fig27_test_error_by_year"))
 ```
 
 **Where the models fail.** Errors were smallest in 2020–2022 and largest in 2024, when the spread between districts
-peaked (Figure \@ref(fig:fig-error-year)). Ridge beat the district-mean baseline until 2023 but not afterwards.
+peaked (Figure \@ref(fig:fig-error-year)). Linear regression beat the district-mean baseline until 2023 but not afterwards.
 Errors were also largest for district-quarters with few houses. Coastal and lifestyle districts became dearer than
 predicted after 2020. A finer tuning grid for the random forest chose the same settings, so the errors are not a
 tuning problem.
@@ -323,14 +325,14 @@ tribble(
   "Residential alteration spending", "dearer", "about +8% to +11%",
   "Region", "varies", "up to about ±10%",
   "New dwellings per 1,000 residents", "dearer", "about +3% to +6%, more in the fastest-growing places",
-  "Number of new houses", "cheaper between districts, dearer within", "about ±5%",
+  "Number of new houses", "cheaper between districts, dearer within", "about ±5–6%",
   "Relative house size", "slightly cheaper", "about −1% to −2%",
   "Dwelling mix", "none detected", "under 1%") |>
   kable(caption = "Answer to RQ1: drivers of relative cost per m².")
 ```
 
 With drivers and region only, the best models explain about a third of the variation in relative cost, about as
-much as the district name alone. With the district added, ridge regression predicts 2020–2026 within about 8%.
+much as the district name alone. With the district added, linear regression predicts 2020–2026 within about 8%.
 Most of the difference between districts lies in factors we do not observe: land, terrain, local labour markets and
 the type of house built.
 
@@ -582,7 +584,7 @@ include_graphics(file.path(proj_root, "outputs", "figures", "app", "app_rq1.png"
 **One theme runs through all three questions: place and the national cycle dominate, and the measurable features
 add only a modest amount.**
 
-* In RQ1, location explains most of the differences in cost, and the drivers about a fifth.
+* In RQ1, location explains most of the differences in cost, and the drivers about 15%.
 * In RQ2, districts form a continuum rather than sharply different types.
 * In RQ3, the national cycle swamps district-level signals.
 

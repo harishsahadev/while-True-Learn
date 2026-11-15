@@ -136,7 +136,7 @@
         <tr><th>Question</th><th>Methods compared</th><th>Chosen</th></tr>
         <tr><td><b>RQ1</b> regression<br><span class="muted">district × quarter</span></td>
             <td>baselines, linear, polynomial, ridge, lasso, elastic net, GAM, <b>regression tree</b>, <b>random forest</b>, XGBoost, SVM</td>
-            <td>ridge (with district); random forest (without)</td></tr>
+            <td>linear regression (with district); random forest (without)</td></tr>
         <tr><td><b>RQ2</b> clustering<br><span class="muted">66 districts</span></td>
             <td><b>k-means</b> and <b>hierarchical</b> (4 linkages); k chosen by 5 criteria</td>
             <td>k-means, k = 3</td></tr>
@@ -162,7 +162,7 @@
     </div>
     <div class="fig"><img src="../../outputs/figures/communication/c04_rq1_drivers.png" alt="Drivers of cost"></div>
     <div class="fig"><img src="../../outputs/figures/communication/c03_rq1_accuracy.png" alt="Prediction error"></div>
-    <div class="answer"><b>Answer:</b> location matters most. The measured drivers explain about a fifth of the gap between districts; Queenstown is still about 15% dearer after them.</div>
+    <div class="answer"><b>Answer:</b> location matters most. The measured drivers explain only about 15% of the gap between districts; Queenstown is still the dearest district after them.</div>
   </section>
 
   <!-- RQ2 -->
@@ -212,7 +212,7 @@
             differences, market types blur together, and next year's direction is hard to call.</li>
         <li><b>Hypotheses:</b> H1 supported; H2 partly (three types, weakly separated); H3 weakly (national
             momentum helps, district momentum reverses).</li>
-        <li><b>Simple models were enough:</b> ridge and logistic regression matched XGBoost, SVM and forests on
+        <li><b>Simple models were enough:</b> linear and logistic regression matched XGBoost, SVM and forests on
             unseen years.</li>
       </ul>
     </div>
