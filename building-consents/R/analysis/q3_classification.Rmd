@@ -1,0 +1,421 @@
+---
+title: "Q3: Will a district's building consents rise or fall next year?"
+subtitle: "Logistic regression, discriminant analysis, k-nearest neighbours and tree-based classifiers"
+author: "while True: learn() · Group 8 · STAT462"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+---
+
+```{r setup, include = FALSE}
+Sys.setenv(LANG = "en")
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, fig.align = "center",
+                      out.width = "80%", fig.width = 8, fig.height = 4.5)
+
+# all paths come from config.R (see building-consents/README.md, "Linking the data")
+source("../config.R")
+
+library(tidyverse)
+library(knitr)
+library(MASS, exclude = "select")
+library(class)
+library(rpart)
+library(rpart.plot)
+library(ranger)
+library(pROC)
+set.seed(seed)
+
+theme_set(theme_minimal(base_size = 12) + theme(legend.position = "top"))
+model_cols <- c(Logistic = "#2a6f97", LDA = "#61a5c2", QDA = "#2d6a4f",
+                KNN = "#6a4c93", Tree = "#bc6c25", Forest = "#c1121f")
+```
+
+**Question.** Using only what is known at the end of year *t*, can we predict whether a district will consent **more new dwellings in year *t*+1 than in year *t***?
+
+**Unit.** One district × year. **Label:** `rising` = 1 if dwellings(*t*+1) > dwellings(*t*). The frame comes from `R/scripts/05_q3_frame.R`.
+
+```{r load}
+dat <- readRDS(derived_file("q3_frame.rds"))
+train <- dat %>% filter(split == "train")
+test  <- dat %>% filter(split == "test")
+
+dat %>% group_by(split) %>%
+  summarise(rows = n(), districts = n_distinct(area),
+            years = paste(range(year), collapse = "–"),
+            `share rising` = mean(rising)) %>%
+  kable(digits = 3, caption = "Train and test district-years")
+```
+
+**Split, by time:** train on feature years `r min(train$year)`–`r max(train$year)`, test on `r min(test$year)`–`r max(test$year)` (labels up to `r max(test$year) + 1`). The classes are close to balanced, so accuracy is meaningful and the 0.5 threshold is a sensible default.
+
+# Features
+
+```{r features}
+feat_local <- c("log_dw", "growth_1y", "growth_3y", "momentum_h2", "volatility",
+                "multi_unit_share", "log_real_m2", "per1000")
+feat_national <- c("nat_growth", "cgpi_growth")
+feat_all <- c(feat_local, feat_national)
+
+tribble(
+  ~feature,           ~scope,      ~meaning,
+  "log_dw",           "district",  "log(1 + new dwellings in year t): market size",
+  "growth_1y",        "district",  "log change in dwellings, t-1 → t",
+  "growth_3y",        "district",  "log change in dwellings, t-3 → t",
+  "momentum_h2",      "district",  "log(2nd-half dwellings / 1st-half dwellings) in year t",
+  "volatility",       "district",  "SD of the last five yearly log changes",
+  "multi_unit_share", "district",  "share of new dwellings that are not stand-alone houses",
+  "log_real_m2",      "district",  "log real $/m² of new houses (CGPI-deflated)",
+  "per1000",          "district",  "new dwellings per 1,000 residents",
+  "nat_growth",       "national",  "log change in national dwellings, t-1 → t",
+  "cgpi_growth",      "national",  "construction-cost inflation (CGPI), Dec t-1 → Dec t"
+) %>% kable(caption = "Features, all measured at the end of year t")
+```
+
+**Inflation** enters in two ways. Cost (`log_real_m2`) is in real dollars, so a district does not look expensive just because it is a later year. Construction-cost inflation (`cgpi_growth`) is a feature in its own right, because rising build costs can push projects to be delayed or cancelled.
+
+# The national cycle
+
+Before modelling, look at the label year by year. Districts tend to move together.
+
+```{r cycle, fig.height = 4}
+dat %>% group_by(year, split) %>% summarise(rising = mean(rising), .groups = "drop") %>%
+  ggplot(aes(year + 1, rising, fill = split)) +
+  geom_col() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_manual(values = c(train = "grey65", test = "#c1121f")) +
+  labs(title = "Share of districts whose consents rose, by label year",
+       x = "Year t+1", y = "Districts rising", fill = NULL)
+```
+
+```{r oracle}
+yearly <- test %>% group_by(year) %>% summarise(share = mean(rising))
+oracle_acc <- mean(pmax(yearly$share, 1 - yearly$share)[match(test$year, yearly$year)])
+```
+
+In some years almost every district falls (2008, the global financial crisis); in others almost every district rises (2020). An "oracle" that knew only the *national* direction of each test year, and predicted that direction for every district, would already be `r round(100 * oracle_acc)`% accurate. So most of what can be predicted here is the national cycle, and our training data contains only `r n_distinct(train$year)` of those cycles.
+
+# Fitting six classifiers
+
+| Method | Tuning (time-blocked CV inside the training years) |
+|---|---|
+| Logistic regression | none |
+| LDA | none |
+| QDA | none |
+| KNN | k, on standardised features |
+| Classification tree | cost-complexity pruning, 1-SE rule |
+| Random forest | `mtry` × node size |
+
+Tuning uses five consecutive blocks of training years. Each block is held out once and scored with the Brier score (mean squared error of the predicted probability).
+
+```{r folds}
+train_years <- sort(unique(train$year))
+year_block  <- tibble(year = train_years, fold = cut(seq_along(train_years), 5, labels = FALSE))
+foldid <- train %>% left_join(year_block, by = "year") %>% pull(fold)
+```
+
+```{r fit-function}
+brier <- function(y, p) mean((y - p)^2)
+
+fit_classifiers <- function(feats, label, tr = train, te = test, fid = foldid) {
+  y  <- tr[[label]]
+  yf <- factor(y, levels = c(0, 1))
+  f  <- reformulate(feats, label)
+  ff <- reformulate(feats, "yf")
+  trf <- mutate(tr, yf = yf)
+
+  mu <- map_dbl(tr[feats], mean); sdv <- map_dbl(tr[feats], sd)
+  std <- function(d) scale(as.matrix(d[feats]), center = mu, scale = sdv)
+  Xtr <- std(tr); Xte <- std(te)
+
+  out <- list(feats = feats, label = label)
+  P <- list()
+
+  out$logit <- glm(f, family = binomial, data = tr)
+  P$Logistic <- predict(out$logit, te, type = "response")
+
+  out$lda <- lda(ff, data = trf)
+  P$LDA <- predict(out$lda, te)$posterior[, "1"]
+
+  out$qda <- qda(ff, data = trf)
+  P$QDA <- predict(out$qda, te)$posterior[, "1"]
+
+  # KNN: probability of class 1 among the k neighbours
+  knn_p <- function(Xa, ya, Xb, k) {
+    pr <- knn(Xa, Xb, factor(ya), k = k, prob = TRUE)
+    w  <- attr(pr, "prob")
+    if_else(pr == "1", w, 1 - w)
+  }
+  ks <- seq(5, 151, by = 6)
+  cv_k <- map_dbl(ks, function(k) mean(map_dbl(1:5, function(j)
+    brier(y[fid == j], knn_p(Xtr[fid != j, ], y[fid != j], Xtr[fid == j, ], k)))))
+  out$k <- ks[which.min(cv_k)]
+  P$KNN <- knn_p(Xtr, y, Xte, out$k)
+
+  full <- rpart(ff, data = trf, method = "class",
+                control = rpart.control(cp = 0.001, minbucket = 20, xval = fid))
+  cpt <- as.data.frame(full$cptable); b <- which.min(cpt$xerror)
+  out$cp <- cpt$CP[which(cpt$xerror <= cpt$xerror[b] + cpt$xstd[b])[1]]
+  out$tree <- prune(full, cp = out$cp)
+  P$Tree <- predict(out$tree, te, type = "prob")[, "1"]
+
+  rf <- function(d, mtry, node, imp = "none")
+    ranger(ff, data = d[, c("yf", feats)], probability = TRUE, num.trees = 500,
+           mtry = mtry, min.node.size = node, importance = imp, seed = seed)
+  grid <- expand.grid(mtry = unique(pmax(1, round(c(1/3, 1/2, 2/3) * length(feats)))),
+                      node = c(10, 40))
+  cv_rf <- map_dbl(seq_len(nrow(grid)), function(i) mean(map_dbl(1:5, function(j) {
+    m <- rf(trf[fid != j, ], grid$mtry[i], grid$node[i])
+    brier(y[fid == j], predict(m, trf[fid == j, ])$predictions[, "1"])
+  })))
+  out$rf_par <- grid[which.min(cv_rf), ]
+  out$rf <- rf(trf, out$rf_par$mtry, out$rf_par$node, imp = "permutation")
+  P$Forest <- predict(out$rf, te)$predictions[, "1"]
+
+  out$probs <- as_tibble(P)
+  out
+}
+
+# metrics on the test set; within-year AUC = can the model rank districts
+# inside one year, whatever the national direction was?
+score <- function(y, p, year, threshold = 0.5) {
+  pred <- as.integer(p > threshold)
+  wy <- tibble(y, p, year) %>% group_by(year) %>%
+    filter(n_distinct(y) == 2) %>%
+    summarise(a = as.numeric(auc(y, p, quiet = TRUE, direction = "<")), .groups = "drop")
+  tibble(accuracy    = mean(pred == y),
+         sensitivity = mean(pred[y == 1] == 1),
+         specificity = mean(pred[y == 0] == 0),
+         AUC         = as.numeric(auc(y, p, quiet = TRUE, direction = "<")),
+         `within-year AUC` = mean(wy$a))
+}
+```
+
+# Part 1: predicting `rising` directly
+
+```{r fit-rising, cache = TRUE, cache.extra = file.mtime(derived_file("q3_frame.rds"))}
+set.seed(seed)
+fit_rise <- fit_classifiers(feat_all, "rising")
+```
+
+```{r results-rising}
+base_rise <- bind_rows(
+  score(test$rising, rep(1, nrow(test)), test$year) %>% mutate(model = "Always 'rise'"),
+  score(test$rising, test$rose_last, test$year) %>% mutate(model = "Same as last year"),
+  score(test$rising, 1 - test$rose_last, test$year) %>% mutate(model = "Opposite of last year"))
+
+res_rise <- imap_dfr(fit_rise$probs, ~ score(test$rising, .x, test$year) %>% mutate(model = .y))
+
+bind_rows(base_rise, res_rise) %>% select(model, everything()) %>%
+  kable(digits = 3, caption = paste0("Test set (", nrow(test), " district-years). Baselines first; AUC is undefined for constant predictions"))
+```
+
+```{r rise-summary, include = FALSE}
+best_rise <- res_rise %>% slice_max(AUC, n = 1)
+best_base <- max(base_rise$accuracy)
+lin_auc   <- res_rise$AUC[res_rise$model == "Logistic"]
+```
+
+**Reading the results.**
+
+- The linear methods (logistic regression, LDA) are at chance on the pooled test set (AUC `r round(lin_auc, 3)`).
+- The best method, **`r best_rise$model`**, reaches AUC `r round(best_rise$AUC, 3)` and `r round(100 * best_rise$accuracy)`% accuracy. That beats the best baseline (`r round(100 * best_base)`%), but it is still well below the `r round(100 * oracle_acc)`% oracle.
+- No model can reliably tell *which years* will be good, because that is a national event.
+- The **within-year AUC** is above 0.5 for every method: inside a single year, the features rank districts better than chance. That suggests splitting the question in two.
+
+```{r by-year, fig.height = 4.5}
+fit_rise$probs %>%
+  mutate(year = test$year, y = test$rising) %>%
+  pivot_longer(-c(year, y), names_to = "model", values_to = "p") %>%
+  group_by(year, model) %>%
+  summarise(accuracy = mean((p > 0.5) == y), .groups = "drop") %>%
+  ggplot(aes(year + 1, accuracy, colour = model)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", colour = "grey60") +
+  geom_line(linewidth = 0.9) +
+  geom_line(data = yearly, aes(year + 1, pmax(share, 1 - share)), inherit.aes = FALSE,
+            colour = "black", linetype = "dotted", linewidth = 0.9) +
+  scale_colour_manual(values = model_cols) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Test accuracy by year (dotted = oracle that knows the national direction)",
+       x = "Label year", y = "Accuracy", colour = NULL)
+```
+
+Accuracy collapses in years when nearly all districts moved the same way and the models predicted the other way.
+
+# Part 2: splitting the question
+
+1. **National: will NZ consents rise next year?** This is one observation per year, so only `r n_distinct(train$year)` training points. That is far too few for any classifier. It is a macro-forecasting problem (interest rates, migration, policy), not a district problem.
+2. **Relative: will this district do better than the country?** The label `outperform` = 1 if the district's log growth from *t* to *t*+1 beats national log growth over the same years. The common cycle cancels out, so every year contributes useful contrasts. Only district features are used, because national features are the same for every district in a year and cannot separate them.
+
+```{r outperform-label}
+nat_next <- dat %>% group_by(year) %>% summarise(nat_next = log(sum(dw_next) / sum(dw)))
+add_label <- function(d) d %>% left_join(nat_next, by = "year") %>%
+  mutate(outperform = as.integer(log((dw_next + 1) / (dw + 1)) > nat_next))
+train <- add_label(train); test <- add_label(test)
+
+tibble(split = c("train", "test"), `share outperforming` = c(mean(train$outperform), mean(test$outperform))) %>%
+  kable(digits = 3)
+```
+
+```{r fit-out, cache = TRUE, cache.extra = file.mtime(derived_file("q3_frame.rds"))}
+set.seed(seed)
+fit_out <- fit_classifiers(feat_local, "outperform", tr = train, te = test)
+```
+
+```{r results-out}
+base_out <- bind_rows(
+  score(test$outperform, rep(0, nrow(test)), test$year) %>% mutate(model = "Always 'not outperform'"),
+  score(test$outperform, as.numeric(test$growth_1y < 0), test$year) %>%
+    mutate(model = "Mean reversion (fell last year → outperform)"))
+res_out <- imap_dfr(fit_out$probs, ~ score(test$outperform, .x, test$year) %>% mutate(model = .y))
+
+bind_rows(base_out, res_out) %>% select(model, everything()) %>%
+  kable(digits = 3, caption = "Test set, relative label (outperform the national change)")
+```
+
+```{r tuning}
+tibble(label = c("rising", "outperform"),
+       knn_k = c(fit_rise$k, fit_out$k),
+       tree_leaves = c(sum(fit_rise$tree$frame$var == "<leaf>"), sum(fit_out$tree$frame$var == "<leaf>")),
+       rf_mtry = c(fit_rise$rf_par$mtry, fit_out$rf_par$mtry),
+       rf_node = c(fit_rise$rf_par$node, fit_out$rf_par$node)) %>%
+  kable(caption = "Hyperparameters chosen by time-blocked CV")
+```
+
+## ROC curves
+
+```{r roc, fig.height = 4.8, fig.width = 10, out.width = "100%"}
+roc_df <- function(fit, y, lab) imap_dfr(fit$probs, function(p, m) {
+  r <- roc(y, p, quiet = TRUE, direction = "<")
+  tibble(model = m, fpr = 1 - r$specificities, tpr = r$sensitivities, label = lab)
+})
+bind_rows(roc_df(fit_rise, test$rising, "rising (absolute)"),
+          roc_df(fit_out, test$outperform, "outperform (relative)")) %>%
+  arrange(label, model, fpr, tpr) %>%
+  mutate(label = factor(label, levels = c("rising (absolute)", "outperform (relative)"))) %>%
+  ggplot(aes(fpr, tpr, colour = model)) +
+  geom_abline(linetype = "dashed", colour = "grey60") +
+  geom_path(linewidth = 0.8) +
+  facet_wrap(~ label) +
+  coord_equal() +
+  scale_colour_manual(values = model_cols) +
+  labs(title = "Test ROC curves", x = "False positive rate", y = "True positive rate", colour = NULL)
+```
+
+## Is the signal real? Bootstrap
+
+District-years from the same district are correlated, so whole districts are resampled with replacement (2,000 times). Each time, the test AUC of every model is recomputed, for both labels.
+
+```{r boot-auc, cache = TRUE, cache.extra = file.mtime(derived_file("q3_frame.rds"))}
+set.seed(seed)
+by_d <- split(seq_len(nrow(test)), test$area)
+fits_by_label <- list(rising = list(fit = fit_rise, y = test$rising),
+                      outperform = list(fit = fit_out, y = test$outperform))
+boot_auc <- map_dfr(1:2000, function(b) {
+  i <- unlist(by_d[sample(names(by_d), replace = TRUE)], use.names = FALSE)
+  imap_dfr(fits_by_label, function(L, lab) map_dfr(names(L$fit$probs), function(m)
+    tibble(label = lab, model = m,
+           auc = as.numeric(auc(L$y[i], L$fit$probs[[m]][i], quiet = TRUE, direction = "<")))))
+})
+```
+
+```{r boot-auc-table}
+boot_auc %>% group_by(label, model) %>%
+  summarise(AUC_median = median(auc), lo = quantile(auc, 0.025), hi = quantile(auc, 0.975),
+            `P(AUC > 0.5)` = mean(auc > 0.5), .groups = "drop") %>%
+  arrange(label, desc(AUC_median)) %>%
+  kable(digits = 3, caption = "Test AUC, 95% district-cluster bootstrap interval")
+```
+
+# What predicts a district outperforming?
+
+## Logistic regression: odds ratios
+
+The features are standardised, so each odds ratio is for a 1-SD increase. 95% intervals come from a district-cluster bootstrap of the training data (500 resamples).
+
+```{r logit-or, cache = TRUE, cache.extra = file.mtime(derived_file("q3_frame.rds"))}
+set.seed(seed)
+train_z <- train %>% mutate(across(all_of(feat_local), ~ as.numeric(scale(.x))))
+f_out <- reformulate(feat_local, "outperform")
+m_z <- glm(f_out, family = binomial, data = train_z)
+by_dt <- split(train_z, train_z$area)
+boot_or <- map_dfr(1:500, function(b) {
+  d <- bind_rows(by_dt[sample(names(by_dt), replace = TRUE)])
+  enframe(coef(glm(f_out, family = binomial, data = d))[-1], "term", "est")
+})
+```
+
+```{r logit-or-plot, fig.height = 4.5}
+or_tab <- boot_or %>% group_by(term) %>%
+  summarise(lo = exp(quantile(est, 0.025)), hi = exp(quantile(est, 0.975))) %>%
+  mutate(OR = exp(coef(m_z)[term]))
+
+ggplot(or_tab, aes(OR, fct_reorder(term, OR))) +
+  geom_vline(xintercept = 1, colour = "grey60") +
+  geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.25, colour = "#2a6f97") +
+  geom_point(size = 2.6, colour = "#2a6f97") +
+  scale_x_log10() +
+  labs(title = "Odds of outperforming the country next year, per 1-SD increase",
+       subtitle = "Logistic regression; bars = 95% district-cluster bootstrap CI",
+       x = "Odds ratio (log scale)", y = NULL)
+kable(arrange(or_tab, desc(abs(log(OR)))), digits = 3, caption = "Odds ratios per 1-SD increase")
+```
+
+## LDA: which direction separates the classes?
+
+```{r lda-coef}
+tibble(feature = feat_local,
+       `LD1 coefficient` = fit_out$lda$scaling[feat_local, 1],
+       `LD1 × SD` = fit_out$lda$scaling[feat_local, 1] * map_dbl(train[feat_local], sd)) %>%
+  arrange(desc(abs(`LD1 × SD`))) %>%
+  kable(digits = 3, caption = "LDA discriminant direction (scaled by each feature's SD so they are comparable)")
+```
+
+## Classification tree and random forest
+
+```{r tree-plot, fig.width = 10, fig.height = 5.5, out.width = "100%"}
+if (nrow(fit_out$tree$frame) > 1) {
+  rpart.plot(fit_out$tree, type = 4, extra = 106, under = TRUE, cex = 0.75,
+             main = "Pruned classification tree: P(outperform)")
+} else cat("The 1-SE rule pruned the tree to its root: no split beats predicting the majority class.\n")
+```
+
+```{r rf-importance, fig.height = 4}
+tibble(feature = names(fit_out$rf$variable.importance), imp = fit_out$rf$variable.importance) %>%
+  ggplot(aes(imp, fct_reorder(feature, imp))) +
+  geom_col(fill = "#c1121f") +
+  labs(title = "Random forest permutation importance (relative label)", x = "Importance", y = NULL)
+```
+
+# Sensitivity: tiny districts
+
+In districts consenting only a handful of dwellings, "rise" and "fall" are close to coin flips (for example 4 → 5). The relative models are re-scored on test districts with at least 20 dwellings in year *t*.
+
+```{r sens-small}
+big <- test$dw >= 20
+imap_dfr(fit_out$probs, ~ tibble(model = .y,
+  `AUC, all` = as.numeric(auc(test$outperform, .x, quiet = TRUE, direction = "<")),
+  `AUC, ≥ 20 dwellings` = as.numeric(auc(test$outperform[big], .x[big], quiet = TRUE, direction = "<")))) %>%
+  kable(digits = 3, caption = paste0("Test AUC, all district-years vs the ", sum(big), " with at least 20 dwellings"))
+```
+
+# Conclusions
+
+```{r conclusion-numbers, include = FALSE}
+best_out  <- res_out %>% slice_max(AUC, n = 1)
+bo <- boot_auc %>% filter(label == "outperform", model == best_out$model)
+br <- boot_auc %>% filter(label == "rising", model == best_rise$model)
+lin_out <- res_out %>% filter(model %in% c("Logistic", "LDA")) %>% pull(AUC) %>% max()
+flex_out <- res_out %>% filter(model %in% c("KNN", "Tree", "Forest")) %>% pull(AUC) %>% max()
+top_or <- or_tab %>% arrange(desc(abs(log(OR)))) %>% slice_head(n = 3)
+fmt_or <- function(i) sprintf("%s (OR %.2f)", top_or$term[i], top_or$OR[i])
+```
+
+1. **The question as posed is only weakly predictable.** The best model for `rising` is `r best_rise$model`: test AUC `r round(best_rise$AUC, 3)` (bootstrap 95% CI `r round(quantile(br$auc, 0.025), 3)`–`r round(quantile(br$auc, 0.975), 3)`) and `r round(100 * best_rise$accuracy)`% accuracy, against `r round(100 * best_base)`% for the best baseline. Logistic regression and LDA are at chance. All of them are far from the `r round(100 * oracle_acc)`% an oracle gets just by knowing the national direction. Whether a district's consents rise is driven mainly by the national cycle, and `r n_distinct(train$year)` training years are too few to learn it.
+2. **Districts can be ranked within a year.** Within-year AUCs above 0.5 show that the features carry *relative* information. Reframed as "will this district beat the national change?", the best model is **`r best_out$model`**, with test AUC `r round(best_out$AUC, 3)` (bootstrap 95% CI `r round(quantile(bo$auc, 0.025), 3)`–`r round(quantile(bo$auc, 0.975), 3)`; P(AUC > 0.5) = `r round(mean(bo$auc > 0.5), 3)`).
+3. **What predicts outperforming.** The strongest logistic effects are `r fmt_or(1)`, `r fmt_or(2)` and `r fmt_or(3)`. Districts whose building picked up in the second half of the year tend to keep going, while districts already dominated by multi-unit building, or with high real costs, tend to lag the country the following year.
+4. **Which methods work depends on the question.** For the absolute label, the random forest is best: it can combine national features (inflation, national growth) with district features in ways a linear boundary cannot. For the relative label, where the national part has been removed, logistic regression and LDA (AUC `r round(lin_out, 3)`) beat KNN, the tree and the forest (best `r round(flex_out, 3)`). With a weak, roughly linear signal and about 1,400 training rows, the flexible methods mostly fit noise.
+5. **Inflation.** Construction-cost inflation is a national feature, so it can shift a whole year but cannot rank districts within it. Cost enters in real (CGPI-deflated) dollars, so `log_real_m2` measures how expensive a district is, not which year it is.
+6. **Limits.** Consents are intentions to build, not completed buildings. Small districts give noisy labels. The test period (2017–2024) contains COVID and the 2022 interest-rate shock, a harder regime than training.
