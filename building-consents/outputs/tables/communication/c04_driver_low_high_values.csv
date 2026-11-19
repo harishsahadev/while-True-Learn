@@ -1,0 +1,6 @@
+feature,unit,p10,p90
+log_resid_alt_real,"renovation spending, $ per quarter (June-2026 dollars)",1411419.0789292932,14088672.97783737
+dwell_per_1000,"new dwellings per 1,000 residents (year)",2,10.7
+log_houses_n,new houses in the quarter,7.999999999999998,125.00000000000004
+rel_house_m2,house size vs rest of NZ (%),-21.297943076960067,14.305896341844715
+houses_yoy,houses vs same quarter last year (%),-35,71.42857142857142

@@ -1,0 +1,31 @@
+name,market,dist_to_centre,dwellings_2016_26,rule
+Waikato,House-building districts,0.6962908450428803,8182,closest to centre
+Whangarei,House-building districts,1.3178670796963523,6103,closest to centre
+Masterton,House-building districts,1.4484766219644412,1865,closest to centre
+Tasman,House-building districts,1.4888307805421899,4317,closest to centre
+Manawatu,House-building districts,1.5334571381754722,1850,closest to centre
+Rangitikei,Slow provincial districts,1.2878730873802846,487,closest to centre
+Grey,Slow provincial districts,1.3614557654363892,559,closest to centre
+Tararua,Slow provincial districts,1.7342255133003737,353,closest to centre
+Whakatane,Slow provincial districts,1.7359675179475633,1144,closest to centre
+South Waikato,Slow provincial districts,1.7548109760348212,684,closest to centre
+Porirua,Urban medium-density,1.7489928902942695,2997,closest to centre
+Napier,Urban medium-density,1.750117907592928,2986,closest to centre
+Palmerston North,Urban medium-density,1.96524954727753,4356,closest to centre
+Christchurch,Urban medium-density,2.048252622879086,35596,closest to centre
+Dunedin,Urban medium-density,2.086449789417088,4705,closest to centre
+Selwyn,House-building districts,2.6308109152423333,15499,most new dwellings
+Waikato,House-building districts,0.6962908450428803,8182,most new dwellings
+Waimakariri,House-building districts,2.1881749969115702,7125,most new dwellings
+Whangarei,House-building districts,1.3178670796963523,6103,most new dwellings
+Waipa,House-building districts,1.6547957418377268,5935,most new dwellings
+Rotorua,Slow provincial districts,3.3206799625456123,3165,most new dwellings
+Invercargill,Slow provincial districts,1.9985543254496927,1801,most new dwellings
+Whanganui,Slow provincial districts,2.539603667611041,1549,most new dwellings
+Whakatane,Slow provincial districts,1.7359675179475633,1144,most new dwellings
+South Taranaki,Slow provincial districts,1.9345818081821429,711,most new dwellings
+Auckland,Urban medium-density,2.6472904702819973,156522,most new dwellings
+Christchurch,Urban medium-density,2.048252622879086,35596,most new dwellings
+Queenstown-Lakes,Urban medium-density,4.385684951480841,13431,most new dwellings
+Hamilton,Urban medium-density,2.42370861191686,13101,most new dwellings
+Tauranga,Urban medium-density,2.779686940288285,11516,most new dwellings

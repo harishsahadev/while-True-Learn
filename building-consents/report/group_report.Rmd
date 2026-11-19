@@ -124,13 +124,16 @@ to reproduce the analysis.
 
 ## Sources
 
-* **Stats NZ, *Building consents issued: August 2026*** (CC BY 4.0): 13 CSV tables, 10.4 million rows. The main table
+* **Stats NZ, *Building consents issued: August 2026*** (CC BY 4.0), with its companion download *New dwellings
+  consented by statistical area 2: August 2026*: 13 CSV tables, 10.4 million rows. The main table
   is *Building consents by territorial authority (Monthly)*: 4.35 million rows, one row per series and month, for 67
   districts from April 1990 to August 2026. Each row is an aggregate, for example "Queenstown-Lakes District, new
   houses, floor area, August 2026 = 13,139 m²". Building types are nested (houses within dwelling units within
   residential buildings), so values are never summed across types.
 * **Stats NZ, *Business price indexes: June 2026 quarter***: the Capital Goods Price Index (CGPI) for dwelling units,
   used to remove building-cost inflation.
+* The two statistical area 2 (SA2) tables were explored but not modelled: they hold dwelling counts only, with no
+  value or floor area.
 * **A district-to-region lookup** we compiled (67 districts → 16 regions). It reproduces Stats NZ's regional totals
   to within 1.3%.
 
@@ -656,6 +659,9 @@ https://www.stats.govt.nz/information-releases/building-consents-issued-august-2
 
 Stats NZ. (2026b). *Business price indexes: June 2026 quarter* [Data set]. Licensed under CC BY 4.0.
 https://www.stats.govt.nz/information-releases/business-price-indexes-june-2026-quarter/
+
+Stats NZ. (2026c). *New dwellings consented by statistical area 2: August 2026* [Data set]. Licensed under CC BY 4.0.
+https://www.stats.govt.nz/assets/Uploads/Building-consents-issued/Building-consents-issued-August-2026/Download-data/new-dwellings-consented-by-statistical-area-2-august-2026.zip
 
 Tibshirani, R., Walther, G., & Hastie, T. (2001). Estimating the number of clusters in a data set via the gap
 statistic. *Journal of the Royal Statistical Society: Series B, 63*(2), 411–423. https://doi.org/10.1111/1467-9868.00293

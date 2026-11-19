@@ -1,0 +1,5 @@
+measure,split,med
+Real cost per square metre (June-2026 NZ$),1990–2019 (training years),2729.934803376801
+Real cost per square metre (June-2026 NZ$),2020–2026 (test years),3198.3770188188537
+Cost vs rest of NZ in the same quarter (%),1990–2019 (training years),-4.293384813674839
+Cost vs rest of NZ in the same quarter (%),2020–2026 (test years),-1.969767831632685

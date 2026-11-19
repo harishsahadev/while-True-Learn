@@ -54,9 +54,11 @@
         const s = n.textContent.replace(/\s+/g, ' ');
         if (!s) continue;
         const p = n.parentElement;
+        const a = p.closest('a[href]');
         out.push({ text: s, size: px(css(p, 'font-size')) * 0.75, weight: parseInt(css(p, 'font-weight')),
                    italic: css(p, 'font-style') === 'italic', colour: colour(css(p, 'color')).hex,
-                   spacing: px(css(p, 'letter-spacing')) * 0.75 });
+                   spacing: px(css(p, 'letter-spacing')) * 0.75, link: a ? a.href : null,
+                   sup: !!p.closest('sup') });
       } else if (n.nodeType === 1) {
         if (n.tagName === 'BR') out.push({ br: true });
         else if (isInline(n)) runs(n, out);

@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[3]
 OUT = ROOT / "communication" / "poster" / "poster.pptx"
 FONT = "Open Sauce One"
 PX = 9525                                  # EMU per CSS pixel (96 per inch)
-SLACK = 1.01                               # text boxes 1% wider: PowerPoint wraps slightly earlier than Chrome
+SLACK = 1.03                               # text boxes 3% wider: PowerPoint wraps slightly earlier than Chrome
 
 
 def emu(v): return Emu(int(round(v * PX)))
@@ -93,8 +93,9 @@ def font_for(weight):
 
 def add_text(slide, it, n):
     one_line = round(it["h"] / (it["lineHeight"] / 0.75)) <= 1
-    w = it["w"] * (1.08 if one_line else SLACK) if it["align"] == "left" else it["w"]   # one-line labels get more room
-    x = it["x"]
+    grow = 1.08 if one_line else SLACK                  # one-line labels get more room
+    w = it["w"] * grow if it["align"] in ("left", "right") else it["w"]
+    x = it["x"] - (w - it["w"] if it["align"] == "right" else 0)   # right-aligned text grows to the left
     tb = slide.shapes.add_textbox(emu(x), emu(it["y"]), emu(w), emu(it["h"]))
     words = " ".join(r["text"] for r in it["runs"] if "text" in r).split()
     tb.name = f"Text {n}: " + " ".join(words[:5])
@@ -116,6 +117,9 @@ def add_text(slide, it, n):
         f.name = name; f.bold = bold; f.italic = r["italic"]; f.size = Pt(round(r["size"] * 2) / 2)
         f.color.rgb = RGBColor.from_string(r["colour"])
         if r.get("spacing"): rr._r.get_or_add_rPr().set("spc", str(int(r["spacing"] * 100)))
+        if r.get("sup"): rr._r.get_or_add_rPr().set("baseline", "30000")       # superscript, e.g. R²
+        if r.get("link"):
+            rr.hyperlink.address = r["link"]; f.color.rgb = RGBColor.from_string(r["colour"])
 
 
 def build(out=OUT):
