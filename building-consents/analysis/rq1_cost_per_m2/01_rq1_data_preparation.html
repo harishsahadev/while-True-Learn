@@ -11,7 +11,7 @@
 
 <meta name="author" content="while True: learn(), Group 8, STAT462" />
 
-<meta name="date" content="2026-11-07" />
+<meta name="date" content="2026-11-20" />
 
 <title>RQ1 Step 1: Data understanding, cleaning and the processed dataset</title>
 
@@ -1572,7 +1572,7 @@ and the processed dataset</h1>
 <h3 class="subtitle">What drives the real cost per m² of new houses
 across districts?</h3>
 <h4 class="author">while True: learn(), Group 8, STAT462</h4>
-<h4 class="date">2026-11-07</h4>
+<h4 class="date">2026-11-20</h4>
 
 </div>
 
@@ -2354,7 +2354,7 @@ every district’s $/m² jumps by 1.15 / 1.125 = <strong>+2.2%</strong> in
 GST-inclusive figures in the pitch.</li>
 </ol>
 <p><span class="math display">\[
-\text{real\_cost\_m2} = \frac{\text{value}}{\text{floor area}} \times
+\text{real_cost_m2} = \frac{\text{value}}{\text{floor area}} \times
 \frac{1}{1+\text{GST}_t} \times
 \frac{\text{CGPI}_{2026Q2}}{\text{CGPI}_t} \times 1.15
 \]</span></p>
@@ -2589,7 +2589,7 @@ costs sit well above the training years.</p>
 cleaner response for that question is a district’s cost <strong>relative
 to the rest of the country in the same quarter</strong>:</p>
 <p><span class="math display">\[
-\text{rel\_log\_cost\_m2} = \log(\text{district real \$/m}^2) -
+\text{rel_log_cost_m2} = \log(\text{district real \$/m}^2) -
 \log(\text{real \$/m}^2 \text{ of all other districts, same quarter})
 \]</span></p>
 <p>A value of +0.10 means “about 10% dearer than the rest of NZ that
@@ -3022,7 +3022,9 @@ saveRDS(rq1_model,  file.path(paths$processed, &quot;rq1_model_data.rds&quot;))
 
 list.files(paths$processed)</code></pre>
 <pre><code>## [1] &quot;rq1_data_dictionary.csv&quot;       &quot;rq1_district_quarter_full.csv&quot;
-## [3] &quot;rq1_model_data.csv&quot;            &quot;rq1_model_data.rds&quot;</code></pre>
+## [3] &quot;rq1_model_data.csv&quot;            &quot;rq1_model_data.rds&quot;           
+## [5] &quot;rq2_district_features.csv&quot;     &quot;rq2_district_features.rds&quot;    
+## [7] &quot;rq3_model_data.csv&quot;            &quot;rq3_model_data.rds&quot;</code></pre>
 <pre class="r"><code>dim(rq1); dim(rq1_model)</code></pre>
 <pre><code>## [1] 9715   43</code></pre>
 <pre><code>## [1] 8662   43</code></pre>
@@ -3292,7 +3294,9 @@ paths &lt;- list(
   reference     = &quot;data/reference&quot;,
   processed     = &quot;data/processed&quot;,
   fig_rq1       = &quot;outputs/figures/rq1&quot;,
-  tab_rq1       = &quot;outputs/tables/rq1&quot;
+  tab_rq1       = &quot;outputs/tables/rq1&quot;,
+  fig_rq2       = &quot;outputs/figures/rq2&quot;,
+  tab_rq2       = &quot;outputs/tables/rq2&quot;
 )
 
 # ---- Reading Stats NZ &quot;Infoshare&quot; long-format CSVs --------------------------

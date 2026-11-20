@@ -338,7 +338,7 @@ We therefore:
 3. add back today's 15% GST, so the numbers stay comparable to the GST-inclusive figures in the pitch.
 
 $$
-\text{real\_cost\_m2} = \frac{\text{value}}{\text{floor area}} \times \frac{1}{1+\text{GST}_t} \times \frac{\text{CGPI}_{2026Q2}}{\text{CGPI}_t} \times 1.15
+\text{real_cost_m2} = \frac{\text{value}}{\text{floor area}} \times \frac{1}{1+\text{GST}_t} \times \frac{\text{CGPI}_{2026Q2}}{\text{CGPI}_t} \times 1.15
 $$
 
 ```{r real-values}
@@ -465,7 +465,7 @@ RQ1 asks about differences **across districts**. A cleaner response for that que
 **relative to the rest of the country in the same quarter**:
 
 $$
-\text{rel\_log\_cost\_m2} = \log(\text{district real \$/m}^2) - \log(\text{real \$/m}^2 \text{ of all other districts, same quarter})
+\text{rel_log_cost_m2} = \log(\text{district real \$/m}^2) - \log(\text{real \$/m}^2 \text{ of all other districts, same quarter})
 $$
 
 A value of +0.10 means "about 10% dearer than the rest of NZ that quarter". The national level is computed

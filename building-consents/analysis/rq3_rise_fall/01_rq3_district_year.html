@@ -11,7 +11,7 @@
 
 <meta name="author" content="while True: learn(), Group 8, STAT462" />
 
-<meta name="date" content="2026-11-15" />
+<meta name="date" content="2026-11-20" />
 
 <title>RQ3 Step 1: The district-year table, the label and the features</title>
 
@@ -1572,7 +1572,7 @@ label and the features</h1>
 <h3 class="subtitle">Will a district’s consents rise or fall next
 year?</h3>
 <h4 class="author">while True: learn(), Group 8, STAT462</h4>
-<h4 class="date">2026-11-15</h4>
+<h4 class="date">2026-11-20</h4>
 
 </div>
 
@@ -1634,9 +1634,10 @@ c(districts = n_distinct(annual$ta), years = n_distinct(annual$year), rows = nro
 <div id="the-label-rise-or-fall-next-year" class="section level1" number="3">
 <h1><span class="header-section-number">3</span> The label: rise or fall
 next year</h1>
-<p><span class="math display">\[\text{rise}_{d,t} = 1 \text{ if new
-dwellings}_{d,t+1} &gt; \text{new dwellings}_{d,t}, \text{ otherwise }
-0.\]</span></p>
+<p><span class="math display">\[
+\text{rise}_{d,t} = 1 \text{ if new dwellings}_{d,t+1} &gt; \text{new
+dwellings}_{d,t}, \text{ otherwise } 0.
+\]</span></p>
 <p>We use <strong>new dwellings</strong> (all types), the headline count
 of the consents data. A year with <em>exactly</em> the same number as
 the year before counts as “not rising”. Those ties are rare and only

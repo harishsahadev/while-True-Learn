@@ -11,7 +11,7 @@
 
 <meta name="author" content="while True: learn(), Group 8, STAT462" />
 
-<meta name="date" content="2026-11-15" />
+<meta name="date" content="2026-11-20" />
 
 <title>RQ1 Step 3: Fitting, tuning and comparing models</title>
 
@@ -1572,7 +1572,7 @@ models</h1>
 <h3 class="subtitle">What drives the real cost per m² of new houses
 across districts?</h3>
 <h4 class="author">while True: learn(), Group 8, STAT462</h4>
-<h4 class="date">2026-11-15</h4>
+<h4 class="date">2026-11-20</h4>
 
 </div>
 
@@ -2311,9 +2311,10 @@ little but are close to linear.</p>
 elastic net (regularised regression)</h1>
 <p><strong>What they are.</strong> OLS with a <strong>penalty</strong>
 on the size of the coefficients:</p>
-<p><span class="math display">\[\min_b \; \sum (y - Xb)^2 / 2n \;+\;
-\lambda \left[ \tfrac{1-\alpha}{2}\sum b_j^2 + \alpha \sum |b_j|
-\right]\]</span></p>
+<p><span class="math display">\[
+\min_b \; \sum (y - Xb)^2 / 2n \;+\; \lambda \left[
+\tfrac{1-\alpha}{2}\sum b_j^2 + \alpha \sum |b_j| \right]
+\]</span></p>
 <ul>
 <li><strong>Ridge</strong> (α = 0) shrinks all coefficients towards
 zero. It helps when features overlap (our VIFs).</li>

@@ -348,7 +348,9 @@ close to linear.
 
 **What they are.** OLS with a **penalty** on the size of the coefficients:
 
-$$\min_b \; \sum (y - Xb)^2 / 2n \;+\; \lambda \left[ \tfrac{1-\alpha}{2}\sum b_j^2 + \alpha \sum |b_j| \right]$$
+$$
+\min_b \; \sum (y - Xb)^2 / 2n \;+\; \lambda \left[ \tfrac{1-\alpha}{2}\sum b_j^2 + \alpha \sum |b_j| \right]
+$$
 
 * **Ridge** (α = 0) shrinks all coefficients towards zero. It helps when features overlap (our VIFs).
 * **Lasso** (α = 1) can shrink coefficients *exactly* to zero, which drops features. That makes it a feature

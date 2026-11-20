@@ -255,7 +255,9 @@ save_fig(p_cor, "fig02_feature_correlation", dir = paths$fig_rq2, height = 5.5)
 A correlation only compares two features at a time. The **variance inflation factor** asks whether a feature can
 be predicted from *all* the others together:
 
-$$\text{VIF}_j = \frac{1}{1 - R^2_j}$$
+$$
+\text{VIF}_j = \frac{1}{1 - R^2_j}
+$$
 
 where $R^2_j$ is the R² from regressing feature *j* on every other feature. A VIF of 1 means the feature is
 unrelated to the others. A VIF of 5 means 80% of its variation is already in the others ($R^2_j$ = 0.8). The usual

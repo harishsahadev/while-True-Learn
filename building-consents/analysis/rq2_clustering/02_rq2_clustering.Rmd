@@ -70,7 +70,9 @@ Clustering has no "right answer" to check against, unlike RQ1's test set. Instea
 Both methods need a measure of how different two districts are. We use the **Euclidean distance** on the
 standardised features: the straight-line distance in nine dimensions,
 
-$$d(a, b) = \sqrt{\sum_{j=1}^{9} (x_{aj} - x_{bj})^2}.$$
+$$
+d(a, b) = \sqrt{\textstyle\sum_{j=1}^{9} (x_{aj} - x_{bj})^2}.
+$$
 
 Standardising (Step 1) gives every feature the same weight. Euclidean distance is also what k-means minimises, so
 using it for hierarchical clustering too keeps the two methods comparable.
@@ -444,7 +446,9 @@ shares. Apart from that, its members are quite different from each other (compar
 **One-way analysis of variance (ANOVA)** tests whether the mean of a variable differs between groups. It splits the
 variation of the feature into a part *between* clusters and a part *within* clusters:
 
-$$F = \frac{\text{between-cluster variance} / (k-1)}{\text{within-cluster variance} / (n-k)}$$
+$$
+F = \frac{\text{between-cluster variance} / (k-1)}{\text{within-cluster variance} / (n-k)}
+$$
 
 A large *F* means the cluster means are far apart compared with the spread inside each cluster. We also report
 **η² (eta squared)**, the share of the feature's variance explained by the clusters (between SS ÷ total SS), which

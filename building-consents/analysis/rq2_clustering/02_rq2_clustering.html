@@ -11,7 +11,7 @@
 
 <meta name="author" content="while True: learn(), Group 8, STAT462" />
 
-<meta name="date" content="2026-11-15" />
+<meta name="date" content="2026-11-20" />
 
 <title>RQ2 Step 2: Clustering districts into building markets</title>
 
@@ -1572,7 +1572,7 @@ building markets</h1>
 <h3 class="subtitle">What kinds of building markets does New Zealand
 have?</h3>
 <h4 class="author">while True: learn(), Group 8, STAT462</h4>
-<h4 class="date">2026-11-15</h4>
+<h4 class="date">2026-11-20</h4>
 
 </div>
 
@@ -1624,8 +1624,9 @@ districts</h1>
 <p>Both methods need a measure of how different two districts are. We
 use the <strong>Euclidean distance</strong> on the standardised
 features: the straight-line distance in nine dimensions,</p>
-<p><span class="math display">\[d(a, b) = \sqrt{\sum_{j=1}^{9} (x_{aj} -
-x_{bj})^2}.\]</span></p>
+<p><span class="math display">\[
+d(a, b) = \sqrt{\textstyle\sum_{j=1}^{9} (x_{aj} - x_{bj})^2}.
+\]</span></p>
 <p>Standardising (Step 1) gives every feature the same weight. Euclidean
 distance is also what k-means minimises, so using it for hierarchical
 clustering too keeps the two methods comparable.</p>
@@ -2596,8 +2597,10 @@ the clusters? (ANOVA)</h1>
 the mean of a variable differs between groups. It splits the variation
 of the feature into a part <em>between</em> clusters and a part
 <em>within</em> clusters:</p>
-<p><span class="math display">\[F = \frac{\text{between-cluster
-variance} / (k-1)}{\text{within-cluster variance} / (n-k)}\]</span></p>
+<p><span class="math display">\[
+F = \frac{\text{between-cluster variance} / (k-1)}{\text{within-cluster
+variance} / (n-k)}
+\]</span></p>
 <p>A large <em>F</em> means the cluster means are far apart compared
 with the spread inside each cluster. We also report <strong>η² (eta
 squared)</strong>, the share of the feature’s variance explained by the

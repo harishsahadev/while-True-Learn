@@ -329,7 +329,9 @@ c(mean_within_year_auc = mean(year_df$within_year_auc))
 
 Logistic regression models the **log-odds** of a rise:
 
-$$\log\frac{P(\text{rise})}{1 - P(\text{rise})} = \beta_0 + \beta_1 x_1 + \dots + \beta_{11} x_{11}.$$
+$$
+\log\frac{P(\text{rise})}{1 - P(\text{rise})} = \beta_0 + \beta_1 x_1 + \dots + \beta_{11} x_{11}.
+$$
 
 The **odds** are P(rise) ÷ P(fall): odds of 1 mean 50:50, odds of 2 mean a rise is twice as likely as a fall. With
 standardised features, e^β is the **odds ratio** for a one-standard-deviation increase in that feature, holding

@@ -79,7 +79,9 @@ c(districts = n_distinct(annual$ta), years = n_distinct(annual$year), rows = nro
 
 # The label: rise or fall next year
 
-$$\text{rise}_{d,t} = 1 \text{ if new dwellings}_{d,t+1} > \text{new dwellings}_{d,t}, \text{ otherwise } 0.$$
+$$
+\text{rise}_{d,t} = 1 \text{ if new dwellings}_{d,t+1} > \text{new dwellings}_{d,t}, \text{ otherwise } 0.
+$$
 
 We use **new dwellings** (all types), the headline count of the consents data. A year with *exactly* the same number
 as the year before counts as "not rising". Those ties are rare and only happen in very small districts.
