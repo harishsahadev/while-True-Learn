@@ -116,7 +116,7 @@ slides = []
 # 0. Title (in the pitch deck's title-slide style)
 slides.append(dict(presenter="andrew", topic=None, els=[
     shape(0.5, 0.4, 0.15, 0.15, "orange", "ellipse"),
-    text(0.74, 0.34, 4, 0.28, [para(run("GROUP 8", 12, False, "ink"), after=0)]),
+    text(0.74, 0.34, 6, 0.28, [para(run("while True: learn()   ·   GROUP 8", 12, False, "ink"), after=0)]),
     text(8.83, 0.34, 4, 0.28, [para(run("November 2026", 12, False, "ink"), align="right", after=0)]),
     shape(10.95, 1.75, 1.75, 1.75, "orange", "ellipse"),
     text(0.8, 1.55, 9.9, 2.6, [para(run("What New Zealand builds,", 50, True, "ink"), after=0),
@@ -128,9 +128,9 @@ slides.append(dict(presenter="andrew", topic=None, els=[
     text(1.62, 6.1, 7, 0.26, [para(run("Presented by", 11, False, "ink"), after=0)]),
     text(1.62, 6.36, 7.6, 0.36, [para(run("Andrew Boulton   ·   Harish Sahadev M   ·   Niwesh Baraj", 15, True, "ink"), after=0)]),
     text(8.33, 6.39, 4.5, 0.32, [para(run("STAT462 Data Mining   ·   Final presentation", 12, False, "ink"), align="right", after=0)])],
-    notes="Andrew: Kia ora, we're Group 8, while True: learn(). I'm Andrew, with Harish and Niwesh. In ten minutes we'll "
-          "show what thirty-six years of building consents tell us about the cost of building, our kinds of building market, "
-          "and whether we can see next year coming."))
+    notes="Andrew (15 s): Kia ora, we're Group 8, while True: learn(). I'm Andrew, with Niwesh and Harish. In ten minutes "
+          "we'll show what thirty-six years of building consents tell us about the cost of building, the kinds of "
+          "building market New Zealand has, and whether we can see next year coming."))
 
 # Numbers on these slides come from outputs/tables (rq1/t05, t08, t09, t12; rq2/t02, t04; rq3/t04, t05) and
 # outputs/tables/communication (written by communication/make_figures.R).
@@ -174,10 +174,11 @@ slides.append(dict(presenter="andrew", topic="Background", els=
             run(" per square metre than the rest of NZ, and Opotiki ", 16), run("18% cheaper", 16, True), run(". Why?", 16)]], size=16)]
     + fig_head("c01_district_relative_cost.png", 5.5, 2.15, 7.35, 4.65,
                "Some districts cost far more to build in than others (medians, 1990–2019)"),
-    notes="Andrew: Before anything is built, a council issues a building consent, and Stats NZ has recorded every one, by "
-          "district, every month since 1990. So consents are an early signal. The chart compares each district with the rest "
-          "of New Zealand in the same quarter. Queenstown-Lakes was typically sixteen percent dearer per square metre, about "
-          "3,100 dollars in today's money, while Opotiki was eighteen percent cheaper. That gap is where our story starts."))
+    notes="Andrew (45 s): Before anything is built, a council issues a building consent, and Stats NZ has recorded every "
+          "one, by district, every month since 1990. So consents are an early signal of what is coming. The chart "
+          "compares each district with the rest of New Zealand in the same quarter. Over 1990 to 2019, Queenstown-Lakes "
+          "was typically sixteen percent dearer per square metre, about 3,100 dollars in today's money, while Opotiki was "
+          "eighteen percent cheaper. Why? That is our first question."))
 
 # 2. Data: files, how combined, which dataset feeds which question
 cols = [("1 · Files we used", [
@@ -185,7 +186,7 @@ cols = [("1 · Files we used", [
             "New homes per 1,000 residents by district: yearly",
             "Consents by region: quarterly, used as a check",
             "Capital Goods Price Index (Stats NZ business price indexes, June 2026)",
-            "SA2 dwelling files: explored, not used (no value or floor area)"]),
+            "Statistical Area 2 (SA2) dwelling files: explored, not used (no value or floor area)"]),
         ("2 · How we combined them", [
             "Joined on district and date; 10.4 million rows added up to 9,715 district-quarters (67 districts)",
             "2010 GST change removed; costs adjusted for building-cost inflation to June-2026 dollars",
@@ -205,12 +206,12 @@ els += [shape(0.5, 5.98, 12.35, 0.82, "tint", "round", line="border"),
         text(0.75, 6.03, 11.85, 0.72, [para(run("Keeping it honest:  ", 15, True, "dark"),
                                             run("every model learns from earlier years and is tested once on later years it never saw. "
                                                 "When two models were about as good, we kept the simpler one.", 15))], valign="middle")]
-slides.append(dict(presenter="harish", topic="Data", els=els,
-    notes="Harish: We used the Stats NZ building consents by district, every month since 1990, plus new homes per thousand "
-          "residents. We added up over ten million rows into one row per district per quarter, removed the 2010 GST change and "
-          "building-cost inflation, so all costs are in June-2026 dollars. From that we built three datasets, one per question: "
-          "district by quarter for cost, one profile per district for the kinds of market, and district by year for next year's "
-          "direction. Every model learns from the past and is tested once on later years it never saw."))
+slides.append(dict(presenter="andrew", topic="Data", els=els,
+    notes="Andrew (45 s): We used the Stats NZ building consents by district, every month since 1990, plus new homes per "
+          "thousand residents and a building-cost price index. We added up over ten million rows into one row per "
+          "district per quarter, and removed the 2010 GST change and building-cost inflation, so every cost is in June "
+          "2026 dollars. From that we built three datasets, one per question. And to keep it honest, every model learns "
+          "from earlier years and is tested once on later years it never saw. Niwesh will now take you through cost."))
 
 # 3. RQ1: why relative cost
 els = title("Comparing like with like", "RQ1 · What drives the real cost per square metre of new houses across districts?")
@@ -224,12 +225,13 @@ els += [text(8.85, 2.3, 3.85, 0.7, [para(run("41%", 34, True, "dark"), after=0)]
                                            run("in the same quarter", 13.5, True),
                                            run(". After 2020 real costs jumped, but this relative cost barely moved, so "
                                                "patterns learnt before 2020 still apply.", 13.5), after=0)])]
-slides.append(dict(presenter="harish", topic="RQ1 · Cost per square metre", els=els,
-    notes="Harish: Our first question is about cost. Forty-one percent of the ups and downs in real cost is simply which quarter "
-          "it is, because the whole country gets dearer together; only nineteen percent is which district. The chart shows "
-          "why that matters: after 2020 real costs jumped, the typical district-quarter going from about 2,700 to 3,200 dollars "
-          "per square metre, but compared with the rest of New Zealand almost nothing moved. So we asked a fairer question: how "
-          "much dearer or cheaper is a district than the rest of the country at the same time?"))
+slides.append(dict(presenter="niwesh", topic="RQ1 · Cost per square metre", els=els,
+    notes="Niwesh (50 s): Our first question is about cost. Forty-one percent of the ups and downs in real cost is simply "
+          "which quarter it is, because the whole country gets dearer together; only nineteen percent is which district. "
+          "The chart shows why that matters: after 2020 real costs jumped, the typical district-quarter going from about "
+          "2,700 to 3,200 dollars per square metre, but compared with the rest of New Zealand almost nothing moved. So we "
+          "asked a fairer question: how much dearer or cheaper is a district than the rest of the country at the same "
+          "time?"))
 
 # 4. RQ1 drivers
 els = title("What makes a district dearer to build in?")
@@ -245,12 +247,13 @@ els += [card(8.2, 1.75, 4.65, 5.05),
             [run("Renovation spending", 15, True), run(" is the strongest sign: wealthy, busy markets build dearer houses", 15)],
             [run("Volume builders", 15, True), run(" make high-building districts cheaper, but any district gets dearer in its own busy years", 15)]],
             size=15)]
-slides.append(dict(presenter="harish", topic="RQ1 · Cost per square metre", els=els,
-    notes="Harish: Each bar shows what happens to a district's predicted cost when one factor goes from a low to a high value. "
-          "The strongest sign of a dear district is renovation spending: going from about 1.4 to 14 million dollars a quarter "
-          "comes with about ten percent higher cost per square metre. Places building lots of homes per resident are four "
-          "percent dearer. Building many houses makes a district cheaper, thanks to volume builders, but any one district gets "
-          "dearer in its own busy years. We left out anything built from house value, because that would give the answer away."))
+slides.append(dict(presenter="niwesh", topic="RQ1 · Cost per square metre", els=els,
+    notes="Niwesh (50 s): Each bar shows what happens to a district's predicted cost when one factor goes from a low to a "
+          "high value. The strongest sign of a dear district is renovation spending: going from about 1.4 to 14 million "
+          "dollars a quarter comes with about ten percent higher cost per square metre. Places building lots of homes per "
+          "resident are four percent dearer. The number of new houses cuts both ways: districts that build a lot are "
+          "cheaper, thanks to volume builders, but any one district gets dearer in its own busy years. We left out "
+          "anything built from house value, because that would give the answer away."))
 
 # 5. RQ1 accuracy and result
 els = title("How well can we predict cost?", "Average error on 2020–2026, years the models never saw")
@@ -260,15 +263,15 @@ els += text_card(8.1, 2.15, 4.75, 3.3, "Why two sets of factors?",
                       "8.6% to 7.9%. The district's own past average alone gets 8.0%. Ten models compared; a plain linear "
                       "regression matched boosted trees and SVMs (appendix).", 15.5)], size=15.5)
 els += result(0.5, 5.62, 12.35, 1.18, "Result (RQ1):",
-              "location matters most. Renovation spending (+10%) and homes per resident (+4%) explain only about 15% of the gap "
-              "between districts; our best model, linear regression with the district, is off by 7.9% on years it never saw "
-              "(guessing the national average: 10.1%).")
-slides.append(dict(presenter="harish", topic="RQ1 · Cost per square metre", els=els,
-    notes="Harish: We tried each model twice: with measured factors only, and with the district's name added. Guessing the "
-          "national average is off by about ten percent. With measured factors only, our chosen model, a random forest, is off "
-          "by 8.6 percent; adding the district brings a plain linear regression to 7.9. And each district's own history already "
-          "gets you to 8.0. So our answer to RQ1: location matters most. The factors we measured explain only about fifteen "
-          "percent of the gap between districts. Andrew will now show the markets we found."))
+              "The real cost per square metre depends mostly on location. Renovation spending (+10%) and homes per resident (+4%) "
+              "explain only about 15% of the gap between districts. Our best model, linear regression with the district, is off "
+              "by 7.9% on 2020–2026, against 10.1% for guessing the national average.", size=14)
+slides.append(dict(presenter="niwesh", topic="RQ1 · Cost per square metre", els=els,
+    notes="Niwesh (45 s): We tried each model twice: with measured factors only, and with the district's name added. "
+          "Guessing the national average is off by about ten percent. With measured factors only, our chosen model, a "
+          "random forest, is off by 8.6 percent; adding the district brings a plain linear regression to 7.9. So our "
+          "answer to RQ1: the cost depends mostly on location. The factors we measured explain only about fifteen percent "
+          "of the gap between districts. Andrew will now show the kinds of building market we found."))
 
 # 6. RQ2 clusters and how k was chosen
 els = title("Three kinds of building market", "RQ2 · What kinds of building markets does New Zealand have?")
@@ -279,11 +282,11 @@ els += text_card(7.95, 2.15, 4.9, 1.72, "How we grouped them",
                  size=12.5)
 els += fig_card("c10_rq2_choose_k.png", 7.95, 4.02, 4.9, 2.78, pad=0.12)
 slides.append(dict(presenter="andrew", topic="RQ2 · Building markets", els=els,
-    notes="Andrew: Our second question: what kinds of building markets does New Zealand have? We described 66 districts by "
-          "nine things, such as what homes they build, how fast and at what cost, and let k-means group similar districts. "
-          "To choose how many groups, we looked at two scores. Three groups were the most stable when we resampled the data, "
-          "0.84, with almost the best separation, so we chose three. A second method, hierarchical clustering, agreed on 60 of "
-          "the 66 districts."))
+    notes="Andrew (50 s): Our second question: what kinds of building markets does New Zealand have? We described 66 "
+          "districts by nine things, such as what homes they build, how fast and at what cost, and let k-means group "
+          "similar districts. To choose how many groups, we looked at two scores. Three groups were the most stable when "
+          "we resampled the data, 0.84, with almost the best separation, so we chose three. A second method, hierarchical "
+          "clustering, agreed on 60 of the 66 districts."))
 
 # 7. RQ2 profiles and result
 mk = [("Cluster 1 · House-building (30)", "Most homes per resident and the biggest houses. Commuter belts and lifestyle areas: "
@@ -295,18 +298,20 @@ mk = [("Cluster 1 · House-building (30)", "Most homes per resident and the bigg
 els = title("How the three clusters differ")
 els += fig_card("c06_rq2_profiles.png", 0.5, 1.75, 7.9, 3.7)
 els += result(0.5, 5.6, 7.9, 1.2, "Result (RQ2):",
-              "three kinds of market. Two methods agree on 60 of 66 districts and the clusters are stable, but the edges are "
-              "soft: a summary of a continuum.", size=13.5)
+              "New Zealand has three kinds of building market: house-building (30 districts), slow provincial (21) and urban "
+              "medium-density (15). The groups are stable (0.84) and two methods agree on 60 of 66 districts, but they overlap "
+              "(silhouette 0.21), so they are broad types rather than sharp boxes.", size=11.5)
 for i, (h, b, col) in enumerate(mk):
     y = 1.75 + i * 1.72
     els += [card(8.6, y, 4.25, 1.58), shape(8.8, y + 0.2, 0.28, 0.28, col, "ellipse"),
             text(9.2, y + 0.12, 3.5, 1.4, [para(run(h, 14, True, "ink"), after=3), para(run(b, 13.5, False, "muted"))])]
 slides.append(dict(presenter="andrew", topic="RQ2 · Building markets", els=els,
-    notes="Andrew: Each bar is the typical, or median, district in a cluster. House-building districts like Selwyn and "
-          "Waimakariri, the commuter belt around Christchurch, build the most homes per resident and the biggest houses. Slow "
-          "provincial districts like Rotorua and Whanganui build the least, spend most on renovation and are cheapest. Urban "
-          "districts, the cities and Queenstown, build the most townhouses and apartments and are dearest. So our answer: three "
-          "kinds of market, but with soft edges. Niwesh will now look ahead to next year."))
+    notes="Andrew (50 s): Each bar is the typical, or median, district in a cluster. House-building districts like "
+          "Selwyn, the commuter belt around Christchurch, build the most homes per resident and the biggest houses. Slow "
+          "provincial districts like Rotorua and Whanganui build the least, in fits and starts, spend most on renovation "
+          "and are cheapest. Urban districts, the cities and Queenstown, build the most townhouses and apartments and are "
+          "dearest. So our answer: three kinds of market, but they overlap, so think of them as broad types. Harish will "
+          "now look ahead to next year."))
 
 # 8. RQ3 together
 els = title("Districts rise and fall together", "RQ3 · Will a district's consents rise or fall next year?")
@@ -319,11 +324,12 @@ els += text_card(8.6, 4.3, 4.25, 2.5, "The national cycle rules",
                       "country is building above its 5-year average, a district's odds of rising are 1.8× higher. So calling one "
                       "district means first calling the whole country, whose turning points follow interest rates and migration, "
                       "which are not in consent data.", 13)], size=13.5)
-slides.append(dict(presenter="niwesh", topic="RQ3 · Next year", els=els,
-    notes="Niwesh: Our third question: will a district build more or less next year? Each bar is a year, showing the share of "
-          "districts that built more than the year before. In 2009, after the global financial crisis, only twelve percent "
-          "did; in 2021, in the post-COVID boom, eighty-eight percent did. The colour shows whether the national total rose. "
-          "Districts rise and fall with the country, so predicting one district really means first predicting New Zealand."))
+slides.append(dict(presenter="harish", topic="RQ3 · Next year", els=els,
+    notes="Harish (50 s): Our third question: will a district build more or less next year? Each bar is a year, showing "
+          "the share of districts that built more than the year before. In 2009, after the global financial crisis, only "
+          "twelve percent did; in 2021, in the post-COVID boom, eighty-eight percent did. The colour shows whether the "
+          "national total rose. Districts rise and fall with the country, so predicting one district really means first "
+          "predicting New Zealand."))
 
 # 9. RQ3 accuracy and result
 els = title("Can we see next year coming?", "Calling up or down for 66 districts, 2018–2025 (years the model never saw)")
@@ -338,14 +344,17 @@ els += [card(7.7, 2.15, 5.15, 3.3),
             [run("Seven models compared: ", 13, True), run("LDA and the lasso tied; trees and forests did no better (appendix)", 13)]],
             size=13)]
 els += result(0.5, 5.62, 12.35, 1.18, "Result (RQ3):",
-              "only modestly predictable. Logistic regression called 58% of district-years correctly (test AUC 0.63), against 50% "
-              "for a coin toss and 53% for the best simple rule; the direction mostly follows the national cycle.")
-slides.append(dict(presenter="niwesh", topic="RQ3 · Next year", els=els,
-    notes="Niwesh: Our model uses eleven facts known at the end of each year, about the district and the whole country. It "
-          "learnt from 1996 to 2016 and was tested on later years. Logistic regression was right fifty-eight percent of the "
-          "time, against fifty for a coin toss and fifty-three for the best simple rule. It helps when the country is building "
-          "above its five-year average. Warning signs are districts relying on apartment projects, which come in big batches, "
-          "so a big year is often followed by a smaller one. Seven models were compared and the fancier ones did no better."))
+              "Whether a district's consents rise or fall next year is only modestly predictable. Logistic regression called 58% "
+              "of 2018–2025 district-years correctly (AUC 0.63), against 53% for the best simple rule. In most years, districts "
+              "simply go up or down along with the country as a whole.", size=14)
+slides.append(dict(presenter="harish", topic="RQ3 · Next year", els=els,
+    notes="Harish (1 min): Our model uses eleven facts known at the end of each year, about the district and the whole "
+          "country. It learnt from 1996 to 2016 and was tested on later years. Logistic regression was right fifty-eight "
+          "percent of the time, against fifty for a coin toss and fifty-three for the best simple rule. It helps when the "
+          "country is building above its five-year average. Warning signs are districts relying on apartment projects, "
+          "which come in big batches, so a big year is often followed by a smaller one. Seven models were compared and "
+          "the fancier ones did no better. So our answer to RQ3: only modestly predictable, because districts mostly move "
+          "with the country."))
 
 # 10. Limitations and next steps
 lims = [("Consents are not completions", "Values are estimates at consent time and leave out land, so we study planned cost.",
@@ -366,11 +375,11 @@ for i, (h, why, fix) in enumerate(lims):
     els += [card(x, y, 3.95, 2.22),
             text(x + 0.22, y + 0.17, 3.55, 1.95, [para(run(h, 17, True, "ink"), after=7), para(run(why, 14.5, False, "muted"), after=9),
                                                   para(run("Fix: ", 14.5, True, "dark"), run(fix, 14.5, False, "ink"), after=0)])]
-slides.append(dict(presenter="niwesh", topic="Limitations", els=els,
-    notes="Niwesh: A few honest limits. Consents are not completions, and their values leave out land. We deflated every "
-          "district with one national building-cost index. District averages hide what happens inside a district. And the big "
-          "economic drivers, land prices, interest rates and migration, are not in consent data; adding them is the most "
-          "promising next step."))
+slides.append(dict(presenter="harish", topic="Limitations", els=els,
+    notes="Harish (45 s): A few honest limits. Consents are not completions, and their values leave out land. We deflated "
+          "every district with one national building-cost index. District averages hide what happens inside a district. "
+          "And the big economic drivers, land prices, interest rates and migration, are not in consent data; adding them "
+          "is the most promising next step."))
 
 # 11. Conclusion
 take = [("RQ1 · Place matters most", "Where you build matters more than anything we measured: our factors explain only about 15% "
@@ -386,8 +395,9 @@ els += text_card(0.5, 4.75, 7.6, 2.05, "Simple was enough",
                  [run("Plain linear and logistic regression did as well as boosted trees, SVMs and forests on years they never "
                       "saw, and they are easy to explain.  ", 13.5),
                   run("Hypotheses: ", 13.5, True),
-                  run("busy markets cost more: partly (location dominates); a few distinct market types: partly (soft edges); "
-                      "momentum predicts next year: weakly (national momentum helps, a district's own reverses).", 13.5)], size=13.5)
+                  run("H1 (busy markets cost more) is partly supported, since location dominates. H2 (a few distinct market types) "
+                      "is partly supported, since the clusters are only weakly separated. H3 (momentum predicts next year) is "
+                      "weakly supported: national momentum helps, but district momentum reverses.", 12.5)], size=13.5)
 els += [shape(8.3, 4.75, 4.55, 2.05, "orange", "round"),
         text(8.5, 4.9, 2.75, 1.8, [para(run("Try it yourself", 18, True, "ink"), after=4),
                                    para(run("Pick a district and ask \"what if\"", 13, False, "ink"), after=6),
@@ -395,12 +405,16 @@ els += [shape(8.3, 4.75, 4.55, 2.05, "orange", "round"),
                                    para(run("nz-building-consents", 11, True, "ink", link=f"https://{APP_URL}/"), after=0)]),
         shape(11.3, 4.92, 1.38, 1.38, "white", "round"),
         img(str(ASSETS / "qr_app.png"), 11.36, 4.98, 1.26, 1.26)]
-slides.append(dict(presenter="niwesh", topic="Conclusion", els=els,
-    notes="Niwesh: To sum up: where you build matters more than anything we could measure; New Zealand has three soft-edged "
-          "building markets; and districts rise and fall with the country, so next year is hard to call. Simple models were "
-          "enough. Finally, a quick look at our app, which is live online. [Demo, about 35 seconds, at "
-          "niwesh.shinyapps.io/nz-building-consents: open the RQ1 tab, pick Selwyn, drag renovation spending up and show the "
-          "predicted cost rise; switch to the RQ3 tab to show 2026 probabilities.] Thank you, we're happy to take questions."))
+slides.append(dict(presenter="harish", topic="Conclusion", els=els,
+    notes="Harish (35 s): To sum up: where you build matters more than anything we could measure; New Zealand has three "
+          "broad, overlapping building markets; and districts rise and fall with the country, so next year is hard to "
+          "call. Simple models were enough. Our hypotheses were partly supported for cost and markets, and only weakly "
+          "for momentum. Niwesh will close for us.  ||  LATER, Niwesh comes back to this slide after the appendix (15 s "
+          "closing + 35 s demo): So, back to what we learned. Where you build matters most, New Zealand has three broad "
+          "building markets, and districts move with the country. Everything we have shown is in our live app. [Demo: "
+          "Overview tab, the three answers at a glance; RQ1 tab, pick Selwyn and drag renovation spending up, predicted "
+          "cost rises; RQ2 tab, pick a district and see its cluster; RQ3 tab, each district's chance of building more "
+          "next year, with the model's accuracy beside it.] Thank you, we're happy to take questions."))
 
 # 12. Appendix A: every model on the test years
 rq1 = [["RQ1: test error, MAPE (%)", "Drivers only", "+ district"],
@@ -425,13 +439,14 @@ els += [text(0.6, 5.85, 12.2, 1.0, [
              "Precision and recall are for \"rise\".", 11, False, "muted"), after=4),
     para(run("RQ2 (clustering) has no test set: k = 3 chosen by stability (0.84 vs 0.74 for k = 2, 0.80 for k = 4) and silhouette "
              "(0.21 vs 0.22 and 0.18); Ward's hierarchical clustering agrees on 60 of 66 districts (ARI 0.75).", 11, False, "muted"), after=0)])]
-slides.append(dict(presenter="niwesh", topic="Appendix", els=els, notes="Appendix for questions: every model's test results."))
+slides.append(dict(presenter="niwesh", topic="Appendix", els=els, notes="Niwesh (5 s): Our appendix has every model's test results, and next our methods and references, for anyone who "
+          "wants the detail in questions."))
 
 # 13. Appendix B: methods and references
 rows = [["", "RQ1 Cost per square metre", "RQ2 Markets", "RQ3 Next year"],
         ["Unit", "District × quarter (5,694 train, 1,611 test)", "District (66)", "District × year (1,386 train, 528 test)"],
         ["Methods", "Baselines, linear, polynomial, ridge, lasso, elastic net, GAM, regression tree, random forest, XGBoost, SVM",
-         "k-means; hierarchical (single, complete, average, Ward)", "Logistic, lasso, LDA, QDA, classification tree, KNN, random forest"],
+         "k-means; hierarchical with Euclidean distance (single, complete, average, Ward)", "Logistic, lasso, LDA, QDA, classification tree, KNN, random forest"],
         ["Validation", "Forward-chaining CV; test 2020–26", "Silhouette, CH, gap, bootstrap stability", "Forward-chaining CV (AUC); test 2017–24"],
         ["Result", "Linear regression: test MAPE 7.9%, test R-squared 0.36", "k = 3; ARI 0.75 between methods", "Logistic: test accuracy 58%, test AUC 0.63"]]
 els = title("Appendix B: methods and references")
@@ -446,8 +461,7 @@ for r, row in enumerate(rows):
         x += cw[c]
     y0 += rh
 BC = "https://www.stats.govt.nz/information-releases/building-consents-issued-august-2026/"
-SA2 = ("https://www.stats.govt.nz/assets/Uploads/Building-consents-issued/Building-consents-issued-August-2026/Download-data/"
-       "new-dwellings-consented-by-statistical-area-2-august-2026.zip")
+SA2 = BC                                          # release page that lists the SA2 file under "Download data"
 BPI = "https://www.stats.govt.nz/information-releases/business-price-indexes-june-2026-quarter/"
 els.append(text(0.6, 5.1, 12.2, 2.1, [
     para(run("References", 12, True, "ink"), after=3),
@@ -458,10 +472,11 @@ els.append(text(0.6, 5.1, 12.2, 2.1, [
     para(run("Stats NZ. (2026). Business price indexes: June 2026 quarter [Data set]. CC BY 4.0. ", 10, False, "muted"),
          run(BPI, 10, False, "dark", link=BPI), after=2),
     para(run("James, G., Witten, D., Hastie, T., & Tibshirani, R. (2021). An introduction to statistical learning (2nd ed.). Springer.", 10, False, "muted"), after=2),
-    para(run("Interactive app: ", 10, True, "ink"), run(f"https://{APP_URL}/", 10, True, "dark", link=f"https://{APP_URL}/"),
-         run("   ·   AI use: Claude (Anthropic) helped write and debug R code and edit text; all analysis choices and results "
-             "were reviewed by the group.", 10, False, "muted"), after=0)]))
-slides.append(dict(presenter="niwesh", topic="Appendix", els=els, notes="Appendix for questions: methods, validation and references."))
+    para(run("Interactive app: ", 10, True, "ink"), run(f"https://{APP_URL}/", 10, True, "dark", link=f"https://{APP_URL}/"), after=2),
+    para(run("AI use: ", 10, True, "ink"), run("Claude (Anthropic) helped write and debug R code and edit text; all analysis choices "
+                                               "and results were reviewed by the group.", 10, False, "muted"), after=0)]))
+slides.append(dict(presenter="niwesh", topic="Appendix", els=els, notes="Niwesh (5 s): Methods, validation and references. Then go back to slide 11 (What we learned) for the closing "
+          "remark and the app demo."))
 
 # ---------------------------------------------------------------- header (as in the pitch) and page number
 for i, s in enumerate(slides):

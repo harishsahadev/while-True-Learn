@@ -399,7 +399,7 @@ include_graphics(fig_path("rq2", "fig05_dendrogram"))
 ```
 
 Ward's three clusters (Figure \@ref(fig:fig-dendro)) agree with k-means on 60 of the 66 districts (adjusted Rand index
-0.75). The six that differ lie on the borders between clusters. k-means was more stable under resampling (0.85 vs
+0.75). The six that differ lie on the borders between clusters. k-means was more stable under resampling (0.84 vs
 0.59), so it gives the final grouping.
 
 ```{r tab-rq2}

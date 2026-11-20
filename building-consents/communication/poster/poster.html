@@ -21,7 +21,7 @@
   body { width: 420mm; height: 594mm; font-family: "Open Sauce One", Arial, sans-serif; color: var(--ink);
          font-size: 10.8pt; line-height: 1.26;
          background: url("../assets/pitch_background.png") top left / 100% 100% no-repeat, #FDEBD3; }
-  .poster { position: relative; width: 420mm; height: 594mm; padding: 8mm 12mm 7mm; display: flex; flex-direction: column; gap: 3.5mm; overflow: hidden; }
+  .poster { position: relative; width: 420mm; height: 594mm; padding: 8mm 12mm 7mm; display: flex; flex-direction: column; justify-content: space-between; gap: 3.5mm; overflow: hidden; }
 
   /* header, after the pitch deck's title slide */
   .topline { display: flex; justify-content: space-between; align-items: center; font-size: 12pt; }
@@ -54,7 +54,7 @@
   .card .fig { margin-bottom: 2.5mm; }
   .fighead { font-size: 10.5pt; font-weight: 700; margin-bottom: 1mm; }
   .card { background: var(--card); border: 1pt solid var(--border); border-radius: 4mm; padding: 4.5mm 5.5mm; }
-  .row3 { display: grid; grid-template-columns: 0.98fr 1fr 1.22fr; gap: 5mm; }
+  .row3 { display: grid; grid-template-columns: 0.97fr 1.06fr 1.17fr; gap: 5mm; }
   table.methods { width: 100%; border-collapse: collapse; font-size: 10.5pt; }
   table.methods th { background: var(--orange); text-align: left; padding: 1.6mm 2mm; font-weight: 700; }
   table.methods td { padding: 1.6mm 2mm; border-top: 1pt solid var(--border); vertical-align: top; }
@@ -62,6 +62,7 @@
   .band { display: grid; grid-template-columns: 168mm 1fr 1fr; grid-template-rows: auto auto; column-gap: 5mm; row-gap: 3mm; }
   .band .text { grid-row: 1 / 3; font-size: 9.8pt; }
   .band .text li { margin-bottom: 0.5mm; }
+  .band.rq2 .text ul { margin-bottom: 0.5mm; }
   .chip { display: inline-block; font-weight: 700; font-size: 11pt; padding: 1mm 3.2mm; border-radius: 10mm; margin-bottom: 2mm; }
   .rq1 .chip { background: var(--dark); color: #fff; } .rq2 .chip { background: var(--orange); color: var(--ink); }
   .rq3 .chip { background: var(--brown); color: #fff; }
@@ -73,7 +74,7 @@
             padding: 2.5mm 3.5mm; font-weight: 700; font-size: 13pt; }
   .answer b { color: var(--dark); }
 
-  .bottom { display: grid; grid-template-columns: 1.2fr 1.08fr 1.28fr; gap: 5mm; font-size: 9.8pt; line-height: 1.22; }
+  .bottom { display: grid; grid-template-columns: 1.3fr 1.06fr 1.2fr; gap: 5mm; font-size: 9.8pt; line-height: 1.22; }
   .bottom li { margin-bottom: 0.8mm; }
   .concl { background: var(--orange); border-radius: 4mm; padding: 4.5mm 5.5mm; }
   .concl h2::before { background: #fff; }
@@ -125,17 +126,18 @@
          area of every consent since 1990: <b>what</b> New Zealand builds, <b>where</b>, and <b>at what cost</b>.</p>
       <div class="fig"><div class="fighead">Some districts cost far more to build in than others</div>
         <img src="../../outputs/figures/communication/c01_district_relative_cost.png" alt="Five dearest and five cheapest districts: cost per square metre compared with the rest of New Zealand, 1990 to 2019">
-        <figcaption>Medians 1990–2019. Queenstown-Lakes typically cost 16% more than the rest of NZ in the same quarter,
-          Opotiki 18% less. $ per square metre in June-2026 dollars. RQ1 asks why.</figcaption></div>
+        <figcaption>Median cost per square metre, 1990–2019, in June 2026 dollars. Queenstown-Lakes typically ran 16% above
+          the rest of New Zealand in the same quarter and Opotiki 18% below. RQ1 asks why.</figcaption></div>
     </div>
     <div class="card">
       <h2>Data</h2>
       <p>Stats NZ consents by district (monthly, April 1990 to June 2026) and new dwellings per 1,000 residents
-         (annual), deflated with the Capital Goods Price Index. SA2 dwelling files explored, not used (no value or area).</p>
+         (annual), deflated with the Capital Goods Price Index. Statistical Area 2 (SA2) dwelling files explored, not used (no value or area).</p>
       <div class="fig"><div class="fighead">Most of the rise in cost is inflation, so we use June-2026 dollars throughout</div>
         <img src="../../outputs/figures/communication/c02b_inflation_poster.png" alt="New-house cost per square metre in nominal and real dollars, 1991 to 2025"></div>
-      <p style="margin:0"><b>Preparation:</b> months added up to 9,715 district-quarters (67 districts); 2010 GST change
-         removed; quarters with under 5 new houses left out; no feature uses house value (it would leak the answer).</p>
+      <p style="margin:0"><b>Preparation:</b> Monthly data was rolled up into 9,715 district-quarters across 67 districts.
+         We removed the 2010 GST change, dropped quarters with fewer than five new houses, and kept house value out of
+         the features so the model couldn't see the answer.</p>
     </div>
     <div class="card">
       <h2>Approach</h2>
@@ -149,7 +151,7 @@
             <td>10 models incl. <b>regression tree</b>, <b>random forest</b> → linear regression</td></tr>
         <tr><td><b>RQ2</b> clustering</td>
             <td>one profile per district, 2016–2026 (66)</td>
-            <td><b>k-means</b>, <b>hierarchical</b> (4 linkages) → k-means, k = 3</td></tr>
+            <td><b>k-means</b>, <b>hierarchical</b> (Euclidean distance, 4 linkages) → k-means, k = 3</td></tr>
         <tr><td><b>RQ3</b> classification</td>
             <td>district × year, 1996–2024 (1,914 rows)</td>
             <td>7 models incl. <b>LDA</b>, <b>QDA</b>, <b>classification tree</b> → logistic regression</td></tr>
@@ -162,21 +164,22 @@
   <!-- RQ1 -->
   <section class="band rq1">
     <div class="text card meta">
-      <span class="chip">RQ1 · Regression</span>
+      <span class="chip">Research Question 1 (RQ1) · Regression</span>
       <div class="q">What drives the real cost per square metre of new houses across districts?</div>
       <div class="hyp">Hypothesis: busier, denser markets cost more per square metre.</div>
       <p><b class="k">Response:</b> a district's cost per square metre <b>relative to the rest of NZ</b> in the same
-         quarter. The quarter alone explains 41% of real cost and the district 19% (R<sup>2</sup>, training rows), so comparing
-         within each quarter removes the national price level.</p>
+         quarter. The quarter alone explains 41% of real cost and the district only 19% (R<sup>2</sup>), so comparing within
+         each quarter removes the national price level.</p>
       <p><b class="k">Features:</b> renovation spending, new homes per 1,000 residents, number and size of new houses,
          change on last year, apartment, townhouse and retirement shares, commercial work, region.
          <b class="k">Left out:</b> anything built from house value (leakage), last quarter's cost, island, season.</p>
       <p><b class="k">Two feature sets:</b> <i>drivers only</i>, and <i>+ district name</i> (how much location adds).
          Train 1996–2019 (5,694 district-quarters), test 2020–2026 (1,611).</p>
       <ul>
-        <li><b>Renovation spending</b> is the strongest driver (+10%): a sign of wealthy, busy markets</li>
-        <li><b>More homes per resident</b> adds +4%, mostly in the fastest-growing places</li>
-        <li><b>More new houses:</b> cheaper across districts (volume builders), dearer in a district's busy years</li>
+        <li><b>Renovation spending</b> is the strongest driver (+10%), a sign of wealthy, busy markets.</li>
+        <li><b>Building more homes per resident</b> adds about 4%, mostly in the fastest-growing places.</li>
+        <li><b>The number of new houses cuts both ways.</b> Districts that build a lot tend to be cheaper, because
+            volume builders dominate, but within any one district the busy years are the dearer ones.</li>
       </ul>
     </div>
     <div class="fig"><img src="../../outputs/figures/communication/c04_rq1_drivers.png" alt="Change in predicted cost when each factor moves from low to high">
@@ -199,30 +202,32 @@
       <div class="tcap">Test set: 2020–2026, never used in training. ★ chosen by CV (simplest within one standard
         error of the best), not by test score. Test R<sup>2</sup>: 0.36 for linear regression with district, 0.27 for the forest.</div>
     </div>
-    <div class="answer"><b>Answer:</b> the real cost per square metre is driven mostly by location: renovation spending
-      (+10%) and homes per resident (+4%) explain only about 15% of the gap between districts. Linear regression with the
-      district is off by 7.9% on 2020–2026 (national average: 10.1%).</div>
+    <div class="answer"><b>Answer:</b> The real cost per square metre depends mostly on location. Renovation spending
+      (+10%) and homes per resident (+4%) explain only about 15% of the gap between districts. Our best model, linear
+      regression with the district, is off by 7.9% on 2020–2026, against 10.1% for guessing the national average.</div>
   </section>
 
   <!-- RQ2 -->
   <section class="band rq2">
     <div class="text card meta">
-      <span class="chip">RQ2 · Clustering</span>
+      <span class="chip">Research Question 2 (RQ2) · Clustering</span>
       <div class="q">What kinds of building markets does New Zealand have?</div>
       <div class="hyp">Hypothesis: districts form a few distinct market types.</div>
       <p><b class="k">Features (9, standardised, 2016–2026):</b> apartment, townhouse and retirement shares; homes per
-         1,000 residents; growth (2021–26 vs 2016–21); volatility; cost vs rest of NZ; house size; commercial share.
-         66 districts (Chatham Islands left out).</p>
-      <p><b class="k">Choosing k:</b> k = 3 is the most stable (bootstrap 0.84 vs 0.74 for k = 2, 0.80 for k = 4) with
-         near-best separation (silhouette 0.21 vs 0.22, 0.18). Ward's clustering agrees on 60 of 66 districts
-         (ARI 0.75). No test set: clustering has no right answer.</p>
+         resident; growth; volatility; cost vs rest of NZ; house size; commercial share.</p>
+      <p><b class="k">Choosing k:</b> k = 3 is the most stable (bootstrap 0.84, vs 0.74 for k = 2 and 0.80 for k = 4) and
+         separates almost as well as the best (silhouette 0.21 vs 0.22). Ward's clustering agrees on 60 of 66 districts
+         (ARI 0.75). There is no test set: clustering has no right answer.</p>
       <ul>
-        <li><b>Cluster 1 · House-building (30):</b> most homes per resident (7.5 per 1,000 a year), biggest houses;
-            commuter belts next to cities (Selwyn, Waimakariri; Waikato, Waipa) and lifestyle areas like Tasman</li>
-        <li><b>Cluster 2 · Slow provincial (21):</b> fewest homes (3.1), up-and-down building, most renovation (23% of
-            housing spend), cheapest (−8%): Rotorua, Invercargill, Whanganui</li>
-        <li><b>Cluster 3 · Urban medium-density (15):</b> most townhouses and apartments (39% of new homes), dearest
-            (+5%): Auckland, Christchurch, Queenstown-Lakes, Hamilton, Tauranga (named: largest builders)</li>
+        <li><b>Cluster 1 · House-building (30):</b> These districts build most homes per resident (7.5 per 1,000 a year)
+            and the biggest houses. They are commuter belts next to cities like Selwyn, Waimakariri, Waikato and Waipa,
+            along with lifestyle areas like Tasman.</li>
+        <li><b>Cluster 2 · Slow provincial (21):</b> These build fewest homes (3.1 per 1,000), with big swings year to
+            year. Renovation takes largest share of housing spend (23%), and costs are the lowest of three clusters (8%
+            below average). Examples : Rotorua, Invercargill &amp; Whanganui.</li>
+        <li><b>Cluster 3 · Urban medium-density (15):</b> Townhouses &amp; apartments make up 39% of new homes, and costs
+            are the highest (5% above average). The largest builders are Auckland, Christchurch, Queenstown-Lakes,
+            Hamilton &amp; Tauranga.</li>
       </ul>
     </div>
     <div class="fig"><img src="../../outputs/figures/communication/c05_rq2_markets.png" alt="Three clusters of districts on the first two principal components">
@@ -232,14 +237,14 @@
       <figcaption>Bars: median value for the districts in each cluster, in the units of each panel title (four of the
         nine features).</figcaption></div>
     <div class="answer"><b>Answer:</b> New Zealand has three kinds of building market: house-building (30 districts),
-      slow provincial (21) and urban medium-density (15). They are stable (0.84) and two methods agree on 60 of 66
-      districts, but separation is weak (silhouette 0.21): a summary of a continuum.</div>
+      slow provincial (21) and urban medium-density (15). The groups are stable (0.84) and two methods agree on 60 of 66
+      districts, but they overlap (silhouette 0.21), so they are broad types rather than sharp boxes.</div>
   </section>
 
   <!-- RQ3 -->
   <section class="band rq3">
     <div class="text card meta">
-      <span class="chip">RQ3 · Classification</span>
+      <span class="chip">Research Question 3 (RQ3) · Classification</span>
       <div class="q">Will a district's consents rise or fall next year?</div>
       <div class="hyp">Hypothesis: recent momentum predicts next year's direction.</div>
       <p><b class="k">Response:</b> does the district consent more new dwellings next year than this year?
@@ -274,9 +279,9 @@
       <div class="tcap">All models on the same 528 test district-years. Precision and recall are for "rise".
         ★ chosen by CV AUC (0.676; lasso 0.677 and LDA 0.675 are within one standard error, so the simpler model is kept).</div>
     </div>
-    <div class="answer"><b>Answer:</b> whether a district's consents rise or fall next year is only modestly predictable:
-      logistic regression called 58% of 2018–2025 district-years correctly (AUC 0.63) vs 53% for the best simple rule;
-      the direction mostly follows the national cycle.</div>
+    <div class="answer"><b>Answer:</b> Whether a district's consents rise or fall next year is only modestly
+      predictable. Logistic regression called 58% of 2018–2025 district-years correctly (AUC 0.63), against 53% for the
+      best simple rule. In most years, districts simply go up or down along with the country as a whole.</div>
   </section>
 
   <!-- Conclusions -->
@@ -292,8 +297,9 @@
             coin toss: national turning points are not in consent data.</li>
         <li><b>Simple, explainable models were enough:</b> linear and logistic regression matched XGBoost, SVMs and
             forests on unseen years.</li>
-        <li><b>Hypotheses:</b> H1 partly supported (location dominates); H2 partly (weakly separated); H3 weakly
-            (national momentum helps, district momentum reverses).</li>
+        <li><b>Hypotheses:</b> H1 is partly supported, since location dominates. H2 is partly supported, since the
+            clusters are only weakly separated. H3 is weakly supported: national momentum helps, but district momentum
+            reverses.</li>
       </ul>
     </div>
     <div class="card lim">
@@ -315,7 +321,7 @@
       <p>Stats NZ. (2026). <i>Building consents issued: August 2026</i> [Data set]. CC BY 4.0.
          <a href="https://www.stats.govt.nz/information-releases/building-consents-issued-august-2026/">https://<wbr>www.stats.govt.nz/<wbr>information-releases/<wbr>building-consents-issued-august-2026/</a></p>
       <p>Stats NZ. (2026). <i>New dwellings consented by statistical area 2: August 2026</i> [Data set]. CC BY 4.0.
-         <a href="https://www.stats.govt.nz/assets/Uploads/Building-consents-issued/Building-consents-issued-August-2026/Download-data/new-dwellings-consented-by-statistical-area-2-august-2026.zip">https://<wbr>www.stats.govt.nz/<wbr>assets/<wbr>Uploads/<wbr>Building-consents-issued/<wbr>Building-consents-issued-August-2026/<wbr>Download-data/<wbr>new-dwellings-consented-by-statistical-area-2-august-2026.zip</a></p>
+         <a href="https://www.stats.govt.nz/information-releases/building-consents-issued-august-2026/">https://<wbr>www.stats.govt.nz/<wbr>information-releases/<wbr>building-consents-issued-august-2026/</a></p>
       <p>Stats NZ. (2026). <i>Business price indexes: June 2026 quarter</i> [Data set]. CC BY 4.0.
          <a href="https://www.stats.govt.nz/information-releases/business-price-indexes-june-2026-quarter/">https://<wbr>www.stats.govt.nz/<wbr>information-releases/<wbr>business-price-indexes-june-2026-quarter/</a></p>
       <p>James, G., Witten, D., Hastie, T., &amp; Tibshirani, R. (2021). <i>An introduction to statistical learning</i> (2nd ed.). Springer.</p>

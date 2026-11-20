@@ -555,7 +555,7 @@ market:
 **How sure are we?**
 
 * k-means and Ward's hierarchical clustering agree on 60 of the 66 districts (ARI 0.75), and k-means reproduces the
-  same clusters in resampled data (stability about 0.85).
+  same clusters in resampled data (stability about 0.84).
 * But the separation is **weak** (mean silhouette about 0.2), and the gap statistic finds no evidence of clusters
   beyond a continuum. The three markets are a useful summary of a continuous range, not sharply separate types.
   Districts near the borders (Palmerston North, Tauranga, Hastings, Gisborne, Invercargill) could reasonably be
