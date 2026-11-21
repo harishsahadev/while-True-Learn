@@ -5,45 +5,48 @@
 # Rules from the assessment brief: one zip, well structured, NO data (raw or
 # processed), under 500 MB.
 #
+# Contents: the analysis notebooks (.Rmd + knitted .html), the R helpers, the
+# figures and results tables they write, the data dictionary, the report as PDF,
+# the .Rproj file and a submission README (tools/README_submission.md, renamed
+# README.md inside the zip). Poster, slides, app and build scripts are left out.
+#
 # Usage (from the project folder):   bash tools/make_submission_zip.sh [output.zip]
 # Default output: submission/Group8_whileTrue_learn_supplementary.zip
 # =============================================================================
 set -euo pipefail
 cd "$(dirname "$0")/.."
+ROOT="$(pwd)"
 OUT="${1:-submission/Group8_whileTrue_learn_supplementary.zip}"
 mkdir -p "$(dirname "$OUT")"
+OUT="$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")"
 rm -f "$OUT"
 
-# what goes in
-INCLUDE=(
-  README.md
-  Building-Consents-Project.Rproj
-  R
-  analysis
-  app
-  report
-  communication
-  docs
-  tools
-  outputs/figures
-  outputs/tables
-)
+STAGE="$(mktemp -d)"
+DEST="$STAGE/Building-Consents-Project"
+mkdir -p "$DEST"
+trap 'rm -rf "$STAGE"' EXIT
 
-# what never goes in: data, saved models (they contain processed data rows),
-# knitr caches, personal notes, pitch material, OS/IDE clutter
-EXCLUDE=(
-  "data/*" "outputs/models/*"
-  "*_cache/*" "*_files/*"
-  "my_notes/*" "extra/*" "submission/*"
-  "*.DS_Store" ".Rproj.user/*" ".Rhistory" "*/.Rhistory"
-  "communication/slides/slides.html" "communication/earlier_versions/*"
-)
+copy() { mkdir -p "$DEST/$(dirname "$1")"; cp "$ROOT/$1" "$DEST/$1"; }
 
-zip -r -q "$OUT" "${INCLUDE[@]}" -x "${EXCLUDE[@]}"
+cp "$ROOT/tools/README_submission.md" "$DEST/README.md"
+copy Building-Consents-Project.Rproj
+for f in R/utils_data.R R/utils_models.R R/utils_cluster.R R/utils_classify.R; do copy "$f"; done
+# notebooks and their knitted HTML only (no caches or *_files folders)
+find analysis -type f \( -name "*.Rmd" -o -name "*.html" \) -not -path "*_cache/*" -not -path "*_files/*" |
+  while read -r f; do copy "$f"; done
+for d in rq1 rq2 rq3; do
+  mkdir -p "$DEST/outputs/figures/$d" "$DEST/outputs/tables/$d"
+  cp "$ROOT/outputs/figures/$d/"*.png "$DEST/outputs/figures/$d/"
+  cp "$ROOT/outputs/tables/$d/"*.csv  "$DEST/outputs/tables/$d/"
+done
+copy docs/data_dictionary.md
+copy report/group_report.pdf
 
-echo "Written: $OUT ($(du -h "$OUT" | cut -f1))"
+(cd "$STAGE" && zip -r -q -X "$OUT" Building-Consents-Project -x "*.DS_Store")
+
+echo "Written: $OUT ($(du -h "$OUT" | cut -f1), $(unzip -Z1 "$OUT" | grep -vc '/$') files)"
 echo "Check that no data slipped in:"
-if unzip -l "$OUT" | grep -E "(^|/)data/|\.rds$|outputs/models" ; then
+if unzip -Z1 "$OUT" | grep -E "(^|/)data/|\.rds$|outputs/models" ; then
   echo "  WARNING: data files found above"; exit 1
 else
   echo "  OK: no data/, .rds or saved models in the zip"
