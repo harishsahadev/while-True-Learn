@@ -1,0 +1,1416 @@
+---
+title: "RQ3: Will a district's building consents rise or fall next year?"
+subtitle: "Building consents (Stats NZ, Aug 2026) — logistic regression, discriminant analysis and tree-based classifiers"
+author: "Andrew Boulton — while True: learn(), Group 8, STAT462"
+output:
+  html_document:
+    toc: yes
+    number_sections: yes
+    toc_float: yes
+---
+
+```{=html}
+<style>
+.boxNote { background-color: lightblue; color: black; border: 2px solid black;
+           margin: 5px; padding: 5px; font-style: italic; }
+</style>
+```
+
+```{r setup, include = FALSE}
+Sys.setenv(LANG = "en")
+knitr::opts_chunk$set(message = FALSE,
+                      warning = FALSE,
+                      fig.align = 'center',
+                      out.width = '75%')
+library(tidyverse)
+library(MASS)          # lda(), qda(); loaded so dplyr::select is always written with its namespace
+library(gridExtra)     # grid.arrange()
+library(pROC)          # roc(), auc()            (section 3)
+library(tree)          # classification tree     (section 5)
+library(randomForest)  # bagging, random forest  (section 5)
+library(gbm)           # boosting                (section 5)
+set.seed(462)
+
+# where the data lives: one line to change per machine (same folder as 03_RQ1.Rmd)
+data_root <- Sys.getenv("STAT462_RQ1_DATA", unset = "data")
+```
+
+This document answers research question 3 of our project: *can a district's
+recent consent record tell us whether its new-dwelling consents will rise or
+fall next year?* It turns the district-by-quarter table into one row per
+district and year, defines the class (rise or fall), builds features that
+are known by the end of each year, and looks at the data before fitting
+anything. It then fits the classifiers in the order the course teaches them:
+logistic regression (Module 3), linear and quadratic discriminant analysis
+(Module 4), and a classification tree, bagging, a random forest and boosting
+(Module 6). Every model is judged on the same time-ordered test set — the
+outcomes of 2020 to 2025 — by its confusion matrix, accuracy and AUC, and
+against four rules of thumb that need no model at all.
+
+# Set up
+
+## Data
+
+The starting point is the same district-by-quarter table as RQ1 and RQ2,
+built by Niwesh's Step 1 notebook from the Stats NZ *Building consents by
+territorial authority (Monthly)* file. We read the full version, with every
+quarter kept, because this question is about counts of dwellings and has no
+use for RQ1's minimum of five houses.
+
+```{r}
+quarters <- read_csv(file.path(data_root, "rq1_district_quarter_full.csv"),
+                     show_col_types = FALSE)
+
+cat("Rows:", nrow(quarters), " Columns:", ncol(quarters),
+    " Districts:", n_distinct(quarters$ta),
+    " Quarters:", min(quarters$yq), "to", max(quarters$yq), "\n")
+```
+
+## From quarters to district-years
+
+The question is about calendar years, so quarters are added up to years. A
+year is only used if all four of its quarters are in the data: 1990 starts
+in its second quarter and 2026 stops after its second, so both are dropped.
+Dollar figures are put into June-2026 dollars quarter by quarter before they
+are added, using the `real_factor` column from Step 1.
+
+```{r}
+years <- quarters %>%
+  mutate(alt_real    = resid_alt_val * real_factor,
+         new_real    = resid_new_val * real_factor,
+         nonres_real = nonres_new_val * real_factor,
+         houses_real = houses_val * real_factor) %>%
+  group_by(ta, region, year) %>%
+  summarise(n_quarters  = n(),
+            dwellings   = sum(dwell_n),               # new dwelling units of every type
+            houses      = sum(houses_n),              # of which stand-alone houses
+            first_half  = sum(dwell_n[quarter <= 2]), # dwellings consented January-June
+            second_half = sum(dwell_n[quarter >= 3]), # dwellings consented July-December
+            alt_real    = sum(alt_real),
+            new_real    = sum(new_real),
+            nonres_real = sum(nonres_real),
+            houses_real = sum(houses_real),
+            houses_m2   = sum(houses_m2),
+            .groups = "drop") %>%
+  # complete calendar years only
+  dplyr::filter(n_quarters == 4) %>%
+  arrange(ta, year)
+
+cat("District-years:", nrow(years), " Districts:", n_distinct(years$ta),
+    " Years:", min(years$year), "to", max(years$year), "\n")
+```
+
+2,345 district-years: 67 districts by 35 complete years, 1991 to 2025.
+
+## The class
+
+A district-year is **rising** if the district consented more new dwellings
+in the following calendar year than in this one. The class of year $t$
+therefore needs year $t + 1$, so the last year that can be classified is
+2024 (its "next year" is 2025).
+
+```{r}
+years <- years %>%
+  group_by(ta) %>%
+  mutate(dwellings_next = lead(dwellings),     # the same district, one year on
+         dwellings_last = lag(dwellings)) %>%  # the same district, one year back
+  ungroup() %>%
+  mutate(rising = as.integer(dwellings_next > dwellings))
+
+obs <- years %>% dplyr::filter(!is.na(dwellings_next))
+
+cat("District-years with a class:", nrow(obs), " (", min(obs$year), "to", max(obs$year), ")\n")
+cat("Share rising:", round(mean(obs$rising), 4), "\n")
+cat("Ties (next year exactly equal to this year):", sum(obs$dwellings_next == obs$dwellings), "\n")
+```
+
+2,278 district-years have a class, 67 districts by 34 years, and 51.2% of
+them are rising. The two classes are close to balanced, so accuracy is a
+fair headline measure and a model that learned nothing would score about
+half.
+
+::: {.boxNote}
+**Ties.** In 52 district-years the next year's count equals this year's
+exactly. They are counted as *not rising*, which is the definition we
+pitched ("rising" means strictly more). We call the two classes Rise and
+Fall for short; Fall includes those 52.
+:::
+
+## Features known at the end of the year
+
+A forecast made at the end of year $t$ can only use what is known then. Each
+feature below is built from year $t$ and earlier, never from year $t + 1$.
+
+| Feature | Question it answers | How it is built |
+|---|---|---|
+| `g1` | Did consents grow this year? | log of this year's dwellings ÷ last year's |
+| `dev3` | Is this year high or low for this district? | log of this year's dwellings ÷ the average of the three years before |
+| `h2_h1` | Was the year speeding up or slowing down? | log of July–December dwellings ÷ January–June |
+| `log_dwell` | How big is the district's market? | log of this year's dwellings |
+| `multi_share` | What is being built? | share of this year's dwellings that are not stand-alone houses |
+| `alt_share` | How much work is on existing homes? | alterations \$ ÷ (alterations \$ + new residential \$) |
+| `nonres_share` | How much building is not housing? | new non-residential \$ ÷ (non-residential \$ + new residential \$) |
+| `cv5` | How erratic is the district? | standard deviation ÷ mean of its last five years of dwellings |
+| `nat_g1` | Did the whole country grow this year? | log of this year's national dwellings ÷ last year's |
+
+Counts have 1 added before a log or a ratio is taken, so that a year with no
+consents (the Chatham Islands has several) does not produce an infinite
+value.
+
+```{r}
+# standard deviation and mean of the five values ending at each position of x
+sd_last5   <- function(x) sapply(seq_along(x), function(i) if (i < 5) NA else sd(x[(i - 4):i]))
+mean_last5 <- function(x) sapply(seq_along(x), function(i) if (i < 5) NA else mean(x[(i - 4):i]))
+
+# one row per year for the country as a whole (the 67 districts added up)
+national <- years %>%
+  group_by(year) %>%
+  summarise(nz_dwellings = sum(dwellings),
+            nz_cost_m2   = sum(houses_real) / sum(houses_m2)) %>%
+  mutate(nat_g1 = log(nz_dwellings / lag(nz_dwellings)))
+
+df_all <- years %>%
+  group_by(ta) %>%
+  mutate(avg3  = (lag(dwellings, 1) + lag(dwellings, 2) + lag(dwellings, 3)) / 3,
+         sd5   = sd_last5(dwellings),
+         mean5 = mean_last5(dwellings)) %>%
+  ungroup() %>%
+  left_join(national, by = "year") %>%
+  mutate(g1           = log((dwellings + 1) / (dwellings_last + 1)),
+         dev3         = log((dwellings + 1) / (avg3 + 1)),
+         h2_h1        = log((second_half + 1) / (first_half + 1)),
+         log_dwell    = log(dwellings + 1),
+         multi_share  = ifelse(dwellings > 0, 1 - houses / dwellings, 0),
+         alt_share    = alt_real / (alt_real + new_real),
+         nonres_share = nonres_real / (nonres_real + new_real),
+         cv5          = sd5 / (mean5 + 1),
+         # used in two sensitivity checks only (section 6), not as headline features
+         rel_cost     = ifelse(houses_m2 > 0, log((houses_real / houses_m2) / nz_cost_m2), NA),
+         change       = log((dwellings_next + 1) / (dwellings + 1)),
+         # the class as a factor, for the models that want one
+         direction    = factor(ifelse(rising == 1, "Rise", "Fall"), levels = c("Fall", "Rise")),
+         # short names for tables: "Selwyn District" -> "Selwyn"
+         district     = str_remove(ta, " District$| City$| Territory$"))
+
+features <- c("g1", "dev3", "h2_h1", "log_dwell", "multi_share",
+              "alt_share", "nonres_share", "cv5", "nat_g1")
+```
+
+The modelling table keeps the district-years that have a class and every
+feature. `cv5` needs five years of history, so the first usable year is 1995.
+
+```{r}
+df <- df_all %>%
+  dplyr::filter(!is.na(dwellings_next)) %>%
+  drop_na(all_of(features)) %>%
+  dplyr::select(district, ta, region, year, dwellings, dwellings_next, change,
+                rising, direction, all_of(features), rel_cost)
+
+cat("Rows:", nrow(df), " Years:", min(df$year), "to", max(df$year),
+    " Districts:", n_distinct(df$ta), "\n")
+
+# rows from 1995 onward that were lost to a missing feature, and which feature
+df_all %>%
+  dplyr::filter(!is.na(dwellings_next), year >= 1995) %>%
+  dplyr::filter(if_any(all_of(features), is.na)) %>%
+  dplyr::select(district, year, dwellings, alt_share, nonres_share) %>%
+  knitr::kable(caption = "District-years from 1995 dropped for a missing feature")
+```
+
+2,009 rows: 67 districts by 30 years, less one. The Chatham Islands had no
+residential consents of any kind in 1998, so its two dollar shares cannot be
+computed for that year.
+
+::: {.boxNote}
+**`nat_g1` is a different kind of feature.** It has one value per year, the
+same for every district, so in the training data it takes only 24 distinct
+values. It is legitimate — the national total for year $t$ is known at the
+end of year $t$ — and it is the only feature that carries the national
+cycle. Section 6 shows the results without it.
+
+**What was left out.** Cost per m² was on the pitch slide's list of
+candidate features; section 6 adds it and shows it makes no difference.
+`region` is offered to the tree-based models only, as in RQ1, because
+logistic regression and discriminant analysis would need 16 dummy columns
+for it.
+:::
+
+## Train and test sets
+
+The split is by time, as in RQ1, and at the same place: a model may learn
+from every outcome up to 2019 and is tested on the outcomes of 2020 to 2025.
+Because the class of year $t$ is the outcome of year $t + 1$, that means
+training on feature years up to 2018 and testing on feature years 2019 to
+2024.
+
+```{r}
+df_train <- df %>% dplyr::filter(year <= 2018)
+df_test  <- df %>% dplyr::filter(year >= 2019)
+
+cat("Training set size:", nrow(df_train), " (feature years", min(df_train$year), "to", max(df_train$year),
+    ") share rising:", round(mean(df_train$rising), 3), "\n")
+cat("Test set size:    ", nrow(df_test),  " (feature years", min(df_test$year),  "to", max(df_test$year),
+    ") share rising:", round(mean(df_test$rising), 3), "\n")
+```
+
+1,607 training rows and 402 test rows. Both sets are close to balanced, but
+they lean in opposite directions: 53.3% of the training rows are rises and
+45.0% of the test rows. A model that simply learned "rises are a little more
+common" would be wrong more often than right on the test years.
+
+# First impression
+
+## The national cycle
+
+```{r}
+cycle <- obs %>%
+  group_by(year) %>%
+  summarise(share_rising = mean(rising))
+
+ggplot(cycle, aes(x = year, y = share_rising)) +
+  geom_col(fill = "steelblue") +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_vline(xintercept = 2018.5, colour = "darkorange", linewidth = 1) +
+  labs(title = "Share of districts whose consents rose the following year",
+       subtitle = "Orange line: training years to the left, test years to the right",
+       x = "Year (the class is next year against this year)", y = "Share of districts rising")
+```
+
+```{r}
+cycle %>%
+  dplyr::filter(year >= 2019) %>%
+  mutate(share_rising = round(share_rising, 2)) %>%
+  knitr::kable(caption = "Test years: share of districts rising the following year")
+```
+
+Districts move together. Only 12% of districts consented more dwellings in
+2009 than in 2008, as the financial crisis took hold; 87% consented more in
+2021 than in 2020. The six test years hold both extremes of the latest
+cycle: almost every district rose after 2020, and about four in five fell
+after 2022 and again after 2023.
+
+How much of the class is that shared movement? If we somehow knew, for each
+year, which way most districts were about to go, and predicted that
+direction for every district:
+
+```{r}
+# share of district-years that moved with the majority of districts that year
+majority <- obs %>%
+  group_by(year) %>%
+  mutate(with_majority = rising == as.integer(mean(rising) > 0.5)) %>%
+  ungroup()
+
+cat("All years 1991-2024:", round(mean(majority$with_majority), 3), "\n")
+cat("Test years 2019-2024:", round(mean(majority$with_majority[majority$year >= 2019]), 3), "\n")
+```
+
+Two-thirds of all district-years (66%), and 71% in the test years, simply
+went the way most of the country went. That number is not available to any model — it uses
+next year's outcome — but it is the right yardstick: the national direction
+is the largest single piece of the answer, and none of the district-level
+features can see it coming.
+
+## The features against the class
+
+```{r, fig.height = 6.5, out.width = '100%'}
+df_train %>%
+  dplyr::select(direction, all_of(features)) %>%
+  pivot_longer(-direction, names_to = "feature", values_to = "value") %>%
+  ggplot(aes(x = direction, y = value, fill = direction)) +
+  geom_boxplot(outlier.size = 0.5) +
+  facet_wrap(~ feature, scales = "free_y", ncol = 3) +
+  scale_fill_manual(values = c("Fall" = "steelblue", "Rise" = "darkorange")) +
+  labs(title = "Each feature by next year's direction (training rows)",
+       x = NULL, y = NULL) +
+  theme(legend.position = "none")
+```
+
+```{r}
+# how far apart the two classes sit on each feature, in pooled standard deviations
+df_train %>%
+  dplyr::select(direction, all_of(features)) %>%
+  pivot_longer(-direction, names_to = "feature", values_to = "value") %>%
+  group_by(feature) %>%
+  summarise(mean_fall = mean(value[direction == "Fall"]),
+            mean_rise = mean(value[direction == "Rise"]),
+            gap_in_sd = (mean_rise - mean_fall) / sd(value)) %>%
+  arrange(desc(abs(gap_in_sd))) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3))) %>%
+  knitr::kable(caption = "Class means on each feature, and the gap between them in standard deviations")
+```
+
+The boxes overlap almost completely on every feature. That is the picture of
+a hard classification problem: no single feature separates the classes. The
+largest gap between the class means is a quarter of a standard deviation, on
+`h2_h1` — districts whose year finished stronger than it started are a
+little more likely to rise — followed by `alt_share` (0.22) and
+`multi_share` (−0.20). The two features that compare this year with the
+district's own past, `g1` and `dev3`, have negative gaps: a district that is
+up on last year, or high against its three-year average, is slightly more
+likely to fall back. That is mean reversion, and it is faint (−0.17 and
+−0.10 standard deviations).
+
+## Rules of thumb
+
+Before any model, four rules that a person could apply with a pencil. They
+set the bar: a model that cannot beat them has learned nothing a rule of
+thumb did not already know.
+
+```{r}
+# accuracy, sensitivity, specificity and precision from predicted and actual classes (1 = rise)
+class_metrics <- function(pred_class, actual) {
+  TP <- sum(pred_class == 1 & actual == 1)
+  TN <- sum(pred_class == 0 & actual == 0)
+  FP <- sum(pred_class == 1 & actual == 0)
+  FN <- sum(pred_class == 0 & actual == 1)
+  c(accuracy    = (TP + TN) / (TP + TN + FP + FN),
+    sensitivity = TP / (TP + FN),                       # share of actual rises that were predicted
+    specificity = TN / (TN + FP),                       # share of actual falls that were predicted
+    precision   = ifelse(TP + FP > 0, TP / (TP + FP), NA))  # share of predicted rises that were right
+}
+
+# area under the ROC curve; direction is fixed so a model worse than chance is not flipped
+auc_of <- function(prob, actual) {
+  as.numeric(auc(roc(actual, prob, levels = c(0, 1), direction = "<", quiet = TRUE)))
+}
+
+# one table of test results that every section adds to
+results <- tibble(model = character(), family = character(), accuracy = numeric(),
+                  sensitivity = numeric(), specificity = numeric(),
+                  precision = numeric(), AUC = numeric())
+
+add_result <- function(results, model, family, pred_class, prob = NULL) {
+  m <- class_metrics(pred_class, df_test$rising)
+  bind_rows(results,
+            tibble(model = model, family = family,
+                   accuracy = m[["accuracy"]], sensitivity = m[["sensitivity"]],
+                   specificity = m[["specificity"]], precision = m[["precision"]],
+                   AUC = if (is.null(prob)) NA else auc_of(prob, df_test$rising)))
+}
+
+# the four rules, applied to the test rows
+rule_majority  <- rep(as.integer(mean(df_train$rising) > 0.5), nrow(df_test))  # the more common class in training
+rule_same      <- as.integer(df_test$g1 > 0)      # rose this year, so will rise again
+rule_opposite  <- as.integer(df_test$g1 <= 0)     # rose this year, so will fall back
+rule_reversion <- as.integer(df_test$dev3 < 0)    # below its own three-year average, so will rise
+
+results <- results %>%
+  add_result("Always the more common class in training", "rule of thumb", rule_majority) %>%
+  add_result("Same direction as this year",              "rule of thumb", rule_same) %>%
+  add_result("Opposite direction to this year",          "rule of thumb", rule_opposite) %>%
+  add_result("Below own 3-year average: rise",           "rule of thumb", rule_reversion)
+
+results %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3))) %>%
+  knitr::kable(caption = "Rules of thumb on the test set")
+```
+
+Persistence fails: "same direction as this year" is right 46% of the time,
+worse than tossing a coin, and "always rise", the more common class in
+training, is right 45% of the time. The mirror image of persistence does
+better (54%), and the best of the four is the mean-reversion rule — a
+district below its own three-year average will rise, one above it will
+fall — at 58.5%. That is the bar on these test years. Section 6.4 asks
+whether the rule does as well in other years.
+
+# Logistic regression
+
+Logistic regression models the probability of the Rise class directly. With
+one feature $x$:
+
+$$p(x) = \frac{e^{b_0 + b_1 x}}{1 + e^{b_0 + b_1 x}}$$
+
+and a district-year is classified as Rise when $p(x)$ is above a threshold,
+0.5 unless there is a reason to choose otherwise.
+
+## Simple logistic regression
+
+We start with the single feature behind the best rule of thumb, `dev3`.
+
+```{r}
+logreg.simple <- glm(rising ~ dev3, data = df_train, family = binomial)
+summary(logreg.simple)
+```
+
+The slope is negative (−0.27, $p = 0.046$): the further a district is above
+its recent average, the less likely it is to rise again. It is also weak —
+the residual deviance, 2216.9, is barely below the null deviance of 2220.9.
+
+The probability for each test row can be computed from the two coefficients
+by the formula above, or with `predict()`. Doing it both ways once confirms
+what `predict()` does.
+
+```{r}
+# extract coefficients
+b0 <- coef(logreg.simple)[1]
+b1 <- coef(logreg.simple)[2]
+
+# make predictions manually, then with the built-in function
+pred_manual <- exp(b0 + b1 * df_test$dev3) / (1 + exp(b0 + b1 * df_test$dev3))
+pred_simple <- predict(logreg.simple, newdata = df_test, type = "response")
+
+all.equal(as.vector(pred_manual), as.vector(pred_simple))
+```
+
+```{r}
+ggplot(df_train, aes(x = dev3, y = rising)) +
+  geom_jitter(height = 0.05, width = 0, alpha = 0.15, size = 0.8) +
+  geom_function(fun = function(x) exp(b0 + b1 * x) / (1 + exp(b0 + b1 * x)),
+                colour = "darkorange", linewidth = 1) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  coord_cartesian(xlim = c(-1.5, 1.5)) +
+  labs(title = "Simple logistic regression: probability of rising against dev3",
+       x = "dev3: log(this year / average of the previous three years)",
+       y = "Rising next year (1) or not (0), and fitted probability")
+```
+
+```{r}
+results <- add_result(results, "Logistic regression, dev3 only", "logistic",
+                      as.integer(pred_simple > 0.5), pred_simple)
+```
+
+```{r}
+round(class_metrics(as.integer(pred_simple > 0.5), df_test$rising), 3)
+cat("Test rows predicted to rise:", sum(pred_simple > 0.5), "of", nrow(df_test), "\n")
+cat("dev3 at which the fitted probability crosses 0.5:", round(-b0 / b1, 3), "\n")
+```
+
+The fitted curve is almost flat and only crosses 0.5 at `dev3` = 0.49, so
+the model calls a rise for every district-year that is less than about 63%
+above its three-year average — nearly all of them. On the test set that is
+47% accurate, worse than the pencil rule built on the same feature. The two
+differ only in where they cut: the rule cuts at zero, and the model cuts
+where the training years, with their 53% of rises, told it to. The lesson
+carries through the rest of the document: a classifier inherits the class
+balance of the years it was trained on, and the test years lean the other
+way.
+
+## Multiple logistic regression
+
+All nine features go in the same way they would into `lm()`.
+
+```{r}
+logreg.fit <- glm(rising ~ g1 + dev3 + h2_h1 + log_dwell + multi_share +
+                    alt_share + nonres_share + cv5 + nat_g1,
+                  data = df_train, family = binomial)
+summary(logreg.fit)
+```
+
+The coefficients are on different scales because the features are. To
+compare them, each is multiplied by its feature's standard deviation: the
+change in the log-odds of rising when the feature goes up by one standard
+deviation.
+
+```{r}
+std_coef <- coef(logreg.fit)[features] * sapply(df_train[features], sd)
+
+tibble(feature = features,
+       coefficient = coef(logreg.fit)[features],
+       per_sd = std_coef,
+       p_value = summary(logreg.fit)$coefficients[features, "Pr(>|z|)"]) %>%
+  arrange(desc(abs(per_sd))) %>%
+  mutate(coefficient = round(coefficient, 3), per_sd = round(per_sd, 3),
+         p_value = signif(p_value, 2)) %>%
+  knitr::kable(caption = "Multiple logistic regression: coefficients, and their size per standard deviation of the feature")
+```
+
+Six of the nine features are significant at the 5% level, and their signs
+tell a consistent story.
+
+- `g1` is negative: a district that grew this year is less likely to grow
+  again. This is the mean reversion of section 2, now carried by `g1`;
+  with `g1` in the model, `dev3` changes sign and is no longer significant
+  ($p = 0.056$), because the two measure nearly the same thing.
+- `h2_h1` is positive: a year that finished stronger than it started tends
+  to carry on. Momentum within the year and reversion between years are
+  both present.
+- `alt_share` is positive and `multi_share` negative: districts doing
+  relatively more work on existing homes, and building relatively fewer
+  multi-unit dwellings, are more likely to rise. Both are probably signs of
+  a market that is low at the moment and has room to recover.
+- `log_dwell` and `nat_g1` are positive: larger markets, and years in which
+  the country as a whole grew, lean towards a rise.
+- `nonres_share` and `cv5` do nothing.
+
+None of the effects is large. The biggest, `alt_share`, changes the log-odds
+by 0.36 per standard deviation, which multiplies the odds of a rise by about
+1.4.
+
+## Evaluating performance
+
+```{r}
+# make predictions with the built-in function
+pred_prob <- predict(logreg.fit, newdata = df_test, type = "response")
+
+# change the predictions from probabilities to classes
+pred_class <- ifelse(pred_prob > 0.5, 1, 0)
+
+# form a confusion matrix
+conf <- table(Predicted = pred_class, Actual = df_test$rising)
+conf
+```
+
+Everything else is read off those four cells. Computing them from the table
+by position, then checking against the helper used for every other model:
+
+```{r}
+TN <- conf["0", "0"]
+FN <- conf["0", "1"]
+FP <- conf["1", "0"]
+TP <- conf["1", "1"]
+total <- TP + TN + FP + FN
+
+paste("Accuracy:", round((TP + TN) / total, 4))
+paste("Misclassification rate:", round((FP + FN) / total, 4))
+paste("Sensitivity (recall):", round(TP / (TP + FN), 4))
+paste("Specificity:", round(TN / (TN + FP), 4))
+paste("Precision:", round(TP / (TP + FP), 4))
+
+round(class_metrics(pred_class, df_test$rising), 4)
+```
+
+The model is right for 247 of the 402 test district-years, 61.4%. It is
+better at falls than at rises: it catches three-quarters of the falls
+(specificity 0.75) and under half of the rises (sensitivity 0.45). When it
+does call a rise, it is right 59% of the time (precision).
+
+```{r}
+results <- add_result(results, "Logistic regression, 9 features", "logistic",
+                      as.integer(pred_class), pred_prob)
+```
+
+## Thresholds, ROC and AUC
+
+The 0.5 threshold is a choice. Lowering it calls more district-years Rise,
+which catches more of the real rises (sensitivity up) at the cost of more
+false alarms (specificity down).
+
+```{r}
+map_dfr(c(0.4, 0.45, 0.5, 0.55, 0.6), function(threshold) {
+  m <- class_metrics(as.integer(pred_prob > threshold), df_test$rising)
+  tibble(threshold = threshold, predicted_rise = sum(pred_prob > threshold),
+         accuracy = m[["accuracy"]], sensitivity = m[["sensitivity"]],
+         specificity = m[["specificity"]], precision = m[["precision"]])
+}) %>%
+  mutate(across(-c(threshold, predicted_rise), ~ round(.x, 3))) %>%
+  knitr::kable(caption = "Multiple logistic regression on the test set at five thresholds")
+```
+
+Moving the threshold trades one kind of error for the other without
+improving accuracy: 0.5 is the best of the five, at 0.4 the model calls 262
+rises and catches 74% of the real ones, and at 0.6 it calls only 36.
+
+The ROC curve shows that trade-off at every threshold at once, and the area
+under it (AUC) summarises it in one number: 0.5 for a model no better than
+chance, 1 for a perfect one.
+
+```{r}
+roc_log <- roc(df_test$rising, pred_prob, levels = c(0, 1), direction = "<", quiet = TRUE)
+
+plot(roc_log, col = "blue", main = "ROC curve: multiple logistic regression, test set")
+legend("bottomright", legend = paste("AUC =", round(auc(roc_log), 3)),
+       col = "blue", lwd = 2, box.lty = 0)
+```
+
+The AUC is 0.63: the curve sits a little above the diagonal along its whole
+length. If one rising and one falling district-year are picked at random,
+the model gives the higher probability to the rising one 63% of the time.
+
+::: {.boxNote}
+**The threshold stays at 0.5 for every model.** Choosing it by looking at
+the test set would be tuning on the test set. Neither kind of error is
+obviously worse here — predicting a rise that does not come and missing one
+that does are both simply wrong — so there is no case for moving it on
+other grounds. The table above is for information only.
+:::
+
+# Discriminant analysis
+
+Discriminant analysis comes at the same problem from the other side. Instead
+of modelling the probability of the class given the features, it models the
+features within each class as normally distributed, and assigns a new
+observation to the class with the higher discriminant score. For one feature
+the score of class $k$ is
+
+$$\delta_k(x) = -\frac{(x - m_k)^2}{2\sigma_k^2} - \log\sigma_k + \log\pi_k$$
+
+where $m_k$ and $\sigma_k^2$ are the mean and variance of the feature in
+class $k$ and $\pi_k$ is the share of the training data in that class.
+Quadratic discriminant analysis (QDA) gives each class its own variance;
+linear discriminant analysis (LDA) makes them share one.
+
+## QDA with one feature, by hand
+
+```{r}
+rise <- df_train %>% dplyr::filter(rising == 1) %>% pull(dev3)
+fall <- df_train %>% dplyr::filter(rising == 0) %>% pull(dev3)
+
+# prior probability, mean and variance of dev3 in each class
+pi_rise <- length(rise) / nrow(df_train)
+pi_fall <- length(fall) / nrow(df_train)
+m_rise <- mean(rise)
+m_fall <- mean(fall)
+var_rise <- var(rise)
+var_fall <- var(fall)
+
+round(c(pi_rise = pi_rise, m_rise = m_rise, sd_rise = sqrt(var_rise),
+        pi_fall = pi_fall, m_fall = m_fall, sd_fall = sqrt(var_fall)), 4)
+
+# discriminant score function for each class
+delta_rise <- function(x) -(x - m_rise)^2 / (2 * var_rise) - log(sqrt(var_rise)) + log(pi_rise)
+delta_fall <- function(x) -(x - m_fall)^2 / (2 * var_fall) - log(sqrt(var_fall)) + log(pi_fall)
+```
+
+```{r}
+ggplot() +
+  geom_function(fun = delta_fall, aes(color = "Fall"), linewidth = 1) +
+  geom_function(fun = delta_rise, aes(color = "Rise"), linewidth = 1) +
+  scale_color_manual(values = c("Fall" = "steelblue", "Rise" = "darkorange")) +
+  scale_x_continuous(limits = c(-1.5, 1.5)) +
+  labs(title = "Discriminant scores of the two classes along dev3",
+       x = "dev3: log(this year / average of the previous three years)",
+       y = "Discriminant score", color = "Class")
+```
+
+Whichever curve is higher at a given `dev3` is the class we assign. Wrapping
+that rule in a function gives a hand-built QDA model, which should agree
+with `qda()` from `MASS` on every test row.
+
+```{r}
+# assign the class with the higher discriminant score
+qda_by_hand <- ifelse(delta_rise(df_test$dev3) > delta_fall(df_test$dev3), 1, 0)
+
+# the built-in function on the same single feature
+qda.simple <- qda(direction ~ dev3, data = df_train)
+qda_builtin <- ifelse(predict(qda.simple, newdata = df_test)$class == "Rise", 1, 0)
+
+paste("Test rows where the hand-built and built-in QDA agree:",
+      sum(qda_by_hand == qda_builtin), "of", nrow(df_test))
+paste("Test rows the one-feature QDA assigns to Rise:", sum(qda_by_hand), "of", nrow(df_test))
+paste("Accuracy of the one-feature QDA:", round(mean(qda_by_hand == df_test$rising), 4))
+```
+
+The hand-built model and `qda()` agree on all 402 test rows, so the formula
+is doing what the function does. As a classifier it is no use: the two
+classes have almost the same mean of `dev3` (−0.015 and 0.022) and almost
+the same spread (0.39 and 0.35), so the two score curves lie nearly on top
+of each other and the Rise curve, lifted by its larger prior, is the higher
+one across the whole range where the data lies. One feature is not enough
+for either method.
+
+## LDA and QDA with all nine features
+
+```{r}
+train_da <- df_train %>% dplyr::select(direction, all_of(features))
+test_da  <- df_test  %>% dplyr::select(direction, all_of(features))
+
+lda.fit <- lda(direction ~ ., data = train_da)
+lda.fit
+```
+
+`lda()` prints the prior probabilities, the class means of each feature and
+the coefficients of the single linear discriminant — the weighted sum of
+the features along which the two classes are furthest apart. The
+coefficients have the same signs as the logistic regression's and are close
+to twice their size throughout (`g1` −1.67 against −0.87, `h2_h1` 1.50
+against 0.76, `alt_share` 5.44 against 2.85): the two methods have found
+the same direction in the data and scaled it differently.
+
+```{r}
+qda.fit <- qda(direction ~ ., data = train_da)
+
+# use $class to extract the predicted classes, $posterior for the class probabilities
+pred_lda <- predict(lda.fit, newdata = test_da)
+pred_qda <- predict(qda.fit, newdata = test_da)
+
+table(Predicted = pred_lda$class, Actual = test_da$direction)
+table(Predicted = pred_qda$class, Actual = test_da$direction)
+```
+
+```{r}
+prob_lda <- pred_lda$posterior[, "Rise"]
+prob_qda <- pred_qda$posterior[, "Rise"]
+
+results <- results %>%
+  add_result("LDA, 9 features", "discriminant", as.integer(pred_lda$class == "Rise"), prob_lda) %>%
+  add_result("QDA, 9 features", "discriminant", as.integer(pred_qda$class == "Rise"), prob_qda)
+
+results %>%
+  dplyr::filter(family != "rule of thumb") %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3))) %>%
+  knitr::kable(caption = "Logistic regression and discriminant analysis on the test set")
+```
+
+```{r}
+# how often LDA and logistic regression make the same call on the test set
+paste("LDA and logistic regression agree on", sum((prob_lda > 0.5) == (pred_prob > 0.5)),
+      "of", nrow(df_test), "test rows")
+paste("QDA and LDA agree on", sum((prob_qda > 0.5) == (prob_lda > 0.5)), "of", nrow(df_test))
+```
+
+```{r}
+# the standard deviation of each feature within each class: LDA assumes these are equal
+train_da %>%
+  group_by(direction) %>%
+  summarise(across(all_of(features), sd)) %>%
+  pivot_longer(-direction, names_to = "feature", values_to = "sd") %>%
+  pivot_wider(names_from = direction, values_from = sd) %>%
+  mutate(ratio = Rise / Fall, across(where(is.numeric), ~ round(.x, 3))) %>%
+  knitr::kable(caption = "Standard deviation of each feature within each class (training rows)")
+```
+
+LDA is right for 246 of 402 (61.2%) and makes the same call as the logistic
+regression on 395 of them. That is expected: both draw a straight boundary
+through the features, and they differ only in how they estimate it.
+
+QDA is right for 237 (59.0%) and behaves differently, agreeing with LDA on
+only 305 rows. It calls many more rises (202 against 143), so it catches
+more of them (sensitivity 0.60 against 0.46) and misses more falls. The last
+table explains why its extra flexibility does not pay: LDA assumes each
+feature has the same spread in both classes, and here the two spreads are
+within 20% of each other on every feature. QDA estimates a separate
+covariance matrix for each class — 45 extra numbers — to model a difference
+that is barely there.
+
+# Tree-based models
+
+A classification tree splits the training rows on one feature at a time,
+choosing each split to make the two sides as pure in class as it can, and
+predicts the majority class of the leaf a new row lands in. Trees find
+thresholds and interactions without being told where to look. As in RQ1 the
+tree-based models are also given `region`, coded with short labels so that
+a split on several regions fits on the plot.
+
+```{r}
+region_short <- c("Northland Region" = "Nthld", "Auckland Region" = "Akl",
+                  "Waikato Region" = "Wkto", "Bay of Plenty Region" = "BoP",
+                  "Gisborne Region" = "Gis", "Hawke's Bay Region" = "HB",
+                  "Taranaki Region" = "Tnki", "Manawatu-Whanganui Region" = "MWh",
+                  "Wellington Region" = "Wgtn", "Tasman Region" = "Tas",
+                  "Nelson Region" = "Nsn", "Marlborough Region" = "Marl",
+                  "West Coast Region" = "WC", "Canterbury Region" = "Cant",
+                  "Otago Region" = "Otago", "Southland Region" = "Sthld",
+                  "Area Outside Region" = "Chat")
+
+# data.frames rather than tibbles: gbm() in particular wants the base class
+make_tree_data <- function(d) {
+  d %>%
+    dplyr::select(direction, all_of(features), region) %>%
+    mutate(region = factor(region_short[as.character(region)], levels = unname(region_short))) %>%
+    as.data.frame()
+}
+
+train_tree <- make_tree_data(df_train)
+test_tree  <- make_tree_data(df_test)
+
+stopifnot(!anyNA(train_tree$region), !anyNA(test_tree$region))
+dim(train_tree)
+```
+
+## Classification tree
+
+```{r}
+class.tree <- tree(direction ~ ., data = train_tree)
+summary(class.tree)
+```
+
+```{r, fig.width = 13, fig.height = 7, out.width = '100%'}
+# type = "uniform" gives every level the same height, so the lower splits can be read
+plot(class.tree, type = "uniform")
+text(class.tree, pretty = 0, cex = 0.7)
+```
+
+The split at the top is the single most useful yes/no question the tree
+could find about a district-year; each leaf is labelled with the class it
+predicts. `summary()` gives the misclassification rate on the training
+rows, which flatters the tree because it was grown on those rows. The test
+set is the honest check.
+
+```{r}
+# predicted class, and the predicted probability of Rise for the ROC curve
+pred_tree_class <- predict(class.tree, newdata = test_tree, type = "class")
+prob_tree       <- predict(class.tree, newdata = test_tree)[, "Rise"]
+
+# compute the error rate
+class.er <- mean(pred_tree_class != test_tree$direction)
+paste("Test error rate of the full tree:", round(class.er, 4))
+
+results <- add_result(results, "Classification tree (full)", "tree-based",
+                      as.integer(pred_tree_class == "Rise"), prob_tree)
+```
+
+## Pruning
+
+A large tree fits the training rows closely and generalises poorly. Module 6
+prunes by cross-validation: `cv.tree()` with `FUN = prune.misclass` reports
+the cross-validated number of misclassified rows for each tree size, and we
+cut the tree back to the size with the fewest.
+
+```{r}
+set.seed(462)
+cv.class <- cv.tree(class.tree, FUN = prune.misclass)
+
+# the best size among trees with at least two leaves: a one-leaf "tree" cannot be plotted
+candidates <- cv.class$size >= 2
+best.size <- cv.class$size[candidates][which.min(cv.class$dev[candidates])]
+
+plot(cv.class$size, cv.class$dev, type = "b", pch = 19,
+     xlab = "Number of terminal nodes", ylab = "CV misclassified rows",
+     main = "Choosing the tree size by cross-validation")
+points(best.size, min(cv.class$dev[candidates]), col = "darkorange", pch = 19, cex = 2)
+cat("Tree sizes tried:", cv.class$size, "\n")
+cat("CV misclassified:", cv.class$dev, "\n")
+cat("Chosen size:", best.size, "\n")
+```
+
+```{r, fig.width = 11, fig.height = 6, out.width = '100%'}
+# use the best size to prune the tree
+pruned.tree <- prune.misclass(class.tree, best = best.size)
+
+plot(pruned.tree, type = "uniform")
+text(pruned.tree, pretty = 0, cex = 0.8)
+```
+
+If the cross-validation curve is nearly flat, that is a finding in itself:
+no size of tree is clearly better than another, which is what happens when
+the splits below the first few are fitting noise.
+
+```{r}
+pred_pruned_class <- predict(pruned.tree, newdata = test_tree, type = "class")
+prob_pruned       <- predict(pruned.tree, newdata = test_tree)[, "Rise"]
+
+pruned.er <- mean(pred_pruned_class != test_tree$direction)
+paste("Test error rate: full tree", round(class.er, 4), " pruned tree", round(pruned.er, 4))
+
+results <- add_result(results, paste0("Classification tree (pruned, ", best.size, " leaves)"),
+                      "tree-based", as.integer(pred_pruned_class == "Rise"), prob_pruned)
+```
+
+::: {.boxNote}
+**A caution about `cv.tree()` here.** Its folds are drawn at random from
+the training rows, so rows from the same year land in different folds, and
+a tree tested on 2008 rows has usually seen other 2008 rows. Because
+districts move together within a year, that makes the cross-validated error
+look better than a forecast of a new year would be. It is the Module 6
+recipe and it is fine for choosing a size, but the test set, not the CV
+curve, is the measure of how well the tree forecasts.
+:::
+
+## Bagging and random forest
+
+Bagging grows many trees on bootstrap samples of the training rows and lets
+them vote; a random forest does the same but offers each split only a
+random subset of the features, which makes the trees less alike. In
+`randomForest()` the difference is `mtry`: all ten predictors for bagging,
+three (about the square root of ten) for a classification forest.
+
+```{r}
+num_predictors <- ncol(train_tree) - 1     # 9 features + region
+
+set.seed(462)
+bag.tree <- randomForest(direction ~ ., data = train_tree,
+                         mtry = num_predictors, ntree = 500, importance = TRUE)
+set.seed(462)
+rf.tree  <- randomForest(direction ~ ., data = train_tree,
+                         mtry = 3, ntree = 500, importance = TRUE)
+bag.tree
+rf.tree
+```
+
+The printed OOB (out-of-bag) error is each training row classified only by
+the trees that did not see it. Both ensembles have an OOB error of about
+37–38%, and both confusion matrices show the pattern of the simple logistic
+model: they are much better at rises than falls on the training rows,
+because rises are the more common class there. The OOB figure carries the
+same same-year caveat as `cv.tree()`, so the test error below is the one to
+trust.
+
+```{r, fig.height = 5, out.width = '100%'}
+varImpPlot(rf.tree, main = "Random forest: variable importance", cex = 0.8)
+```
+
+```{r}
+pred_bag_class <- predict(bag.tree, newdata = test_tree)
+prob_bag       <- predict(bag.tree, newdata = test_tree, type = "prob")[, "Rise"]
+pred_rf_class  <- predict(rf.tree,  newdata = test_tree)
+prob_rf        <- predict(rf.tree,  newdata = test_tree, type = "prob")[, "Rise"]
+
+bag.er <- mean(pred_bag_class != test_tree$direction)
+rf.er  <- mean(pred_rf_class  != test_tree$direction)
+paste("Test error rate: bagging", round(bag.er, 4), " random forest", round(rf.er, 4))
+
+results <- results %>%
+  add_result("Bagging (mtry = 10)",      "tree-based", as.integer(pred_bag_class == "Rise"), prob_bag) %>%
+  add_result("Random forest (mtry = 3)", "tree-based", as.integer(pred_rf_class == "Rise"),  prob_rf)
+```
+
+On the test set both ensembles are wrong about 41–42% of the time, a few
+points worse than their OOB estimates suggested. The importance plot puts
+`nat_g1` first by a wide margin on the accuracy measure; section 6.6
+compares that ranking with the other models'.
+
+## Boosting
+
+Boosting grows small trees one after another, each concentrating on the
+rows the ensemble so far gets wrong, and adds them up scaled by the
+shrinkage. `gbm()` wants the class as a number, 0 or 1, and
+`distribution = "bernoulli"` for a two-class problem. The number of trees
+is what decides between underfitting and overfitting, so we choose it by
+cross-validation — with folds made of blocks of years, as in RQ1, so that
+every fold is a set of years the model has not seen.
+
+```{r}
+train_gbm <- train_tree %>%
+  mutate(rising = as.integer(direction == "Rise")) %>%
+  dplyr::select(-direction)
+test_gbm <- test_tree %>%
+  mutate(rising = as.integer(direction == "Rise")) %>%
+  dplyr::select(-direction)
+
+# five blocks of training years: 1995-99, 2000-04, 2005-09, 2010-14, 2015-18
+fold_id <- cut(df_train$year, breaks = c(1994, 1999, 2004, 2009, 2014, 2018), labels = FALSE)
+table(fold_id)
+
+tree_grid <- seq(100, 3000, by = 100)
+
+# for each block: fit on the other four, record the error rate on the block at every number of trees
+cv_error <- sapply(1:5, function(k) {
+  set.seed(462)
+  fit <- gbm(rising ~ ., data = train_gbm[fold_id != k, ],
+             distribution = "bernoulli", n.trees = max(tree_grid),
+             interaction.depth = 1, shrinkage = 0.01, verbose = FALSE)
+  prob <- predict(fit, newdata = train_gbm[fold_id == k, ], n.trees = tree_grid, type = "response")
+  colMeans((prob > 0.5) != train_gbm$rising[fold_id == k])
+})
+
+cv_boost <- tibble(n_trees = tree_grid, cv_error = rowMeans(cv_error))
+best_trees <- cv_boost$n_trees[which.min(cv_boost$cv_error)]
+
+ggplot(cv_boost, aes(x = n_trees, y = cv_error)) +
+  geom_line() +
+  geom_point() +
+  geom_vline(xintercept = best_trees, colour = "darkorange", linetype = "dashed") +
+  labs(title = "Boosting: cross-validated error rate against the number of trees",
+       subtitle = "Stumps (depth 1), shrinkage 0.01, five blocks of years",
+       x = "Number of trees", y = "CV error rate")
+
+cat("Number of trees with the lowest CV error:", best_trees,
+    " CV error:", round(min(cv_boost$cv_error), 4), "\n")
+```
+
+Read the vertical axis before the shape. On blocks of years it has not
+seen, the boosted model is wrong about 47–49% of the time whatever the
+number of trees: barely better than a coin. The whole curve spans about two
+percentage points, so the number of trees it picks is the lowest point of a
+nearly flat line. This is the first sight of a result that section 6.4
+looks at directly.
+
+```{r}
+set.seed(462)
+boost.fit <- gbm(rising ~ ., data = train_gbm,
+                 distribution = "bernoulli", n.trees = best_trees,
+                 interaction.depth = 1, shrinkage = 0.01, verbose = FALSE)
+
+# relative influence: share of the total improvement attributed to each feature
+summary(boost.fit, plotit = FALSE) %>%
+  mutate(rel.inf = round(rel.inf, 2)) %>%
+  knitr::kable(row.names = FALSE, caption = "Boosting: relative influence of each feature")
+```
+
+```{r}
+prob_boost <- predict(boost.fit, newdata = test_gbm, n.trees = best_trees, type = "response")
+boost.pred <- ifelse(prob_boost >= 0.5, 1, 0)
+
+paste("Test error rate of the boosted model:", round(mean(boost.pred != test_gbm$rising), 4))
+
+results <- add_result(results, paste0("Boosting (", best_trees, " stumps)"), "tree-based",
+                      as.integer(boost.pred), prob_boost)
+```
+
+On the test set the boosted model is wrong about 40% of the time, close to
+the logistic regression. Its relative influence table is led by `h2_h1` and
+`nat_g1`, which together account for about half of the total.
+
+# Evaluate performance
+
+## Every model on the same test set
+
+```{r}
+results_test <- results %>%
+  arrange(desc(accuracy)) %>%
+  mutate(rank = row_number()) %>%
+  dplyr::select(rank, model, family, accuracy, sensitivity, specificity, precision, AUC)
+
+results_test %>%
+  mutate(across(where(is.numeric) & !rank, ~ round(.x, 3))) %>%
+  knitr::kable(caption = "Every model and rule of thumb on the same 402 test district-years, most accurate first")
+```
+
+```{r, fig.height = 5.5, out.width = '90%'}
+best_rule <- max(results$accuracy[results$family == "rule of thumb"])
+
+results_test %>%
+  mutate(model = fct_reorder(model, accuracy)) %>%
+  ggplot(aes(x = model, y = accuracy, fill = family)) +
+  geom_col() +
+  coord_flip() +
+  geom_hline(yintercept = 0.5, linetype = "dotted") +
+  geom_hline(yintercept = best_rule, linetype = "dashed") +
+  labs(title = "Test accuracy by model",
+       subtitle = "Dotted: a coin toss. Dashed: the best rule of thumb",
+       x = NULL, y = "Accuracy on the test set", fill = NULL) +
+  theme(legend.position = "bottom")
+```
+
+Leaving the single trees aside (their rows are in the table), the models
+that use all the features land between 58% and 61%, and the best rule of
+thumb, at 58.5%, sits inside that band. Logistic regression (61.4%) and LDA
+(61.2%) are at the top, boosting is at 60%, QDA and the two forests at
+58–59%. The order among them means little: with 402 test rows, an accuracy
+near 60% has a standard error of about 2.4 points, so models one or two
+points apart cannot be told from each other.
+
+Two things in the table are clear. Logistic regression, discriminant
+analysis and the ensembles all beat the three weaker rules (45%, 46% and
+54%) by several points. And no model beats the mean-reversion rule by more
+than three points. On these test years, what nine features and seven
+algorithms add to a single subtraction is small.
+
+## ROC curves
+
+```{r, fig.height = 6}
+roc_of <- function(prob) roc(df_test$rising, prob, levels = c(0, 1), direction = "<", quiet = TRUE)
+
+roc_list <- list("Logistic regression" = roc_of(pred_prob),
+                 "LDA"                 = roc_of(prob_lda),
+                 "QDA"                 = roc_of(prob_qda),
+                 "Random forest"       = roc_of(prob_rf),
+                 "Boosting"            = roc_of(prob_boost))
+roc_cols <- c("blue", "darkgreen", "purple", "darkorange", "red")
+
+plot(roc_list[[1]], col = roc_cols[1], main = "ROC curves on the test set")
+for (i in 2:length(roc_list)) plot(roc_list[[i]], col = roc_cols[i], add = TRUE)
+legend("bottomright",
+       legend = paste0(names(roc_list), " (AUC ", round(sapply(roc_list, auc), 3), ")"),
+       col = roc_cols, lwd = 2, box.lty = 0, cex = 0.9)
+```
+
+The five curves lie on top of each other, a little above the diagonal, with
+AUCs between 0.60 and 0.63. A different threshold would not rescue any of
+them: there is no part of the curve where one model pulls away.
+
+## Where the models are right and wrong
+
+Accuracy over six years hides which years. The logistic regression and the
+random forest, year by year, beside the share of districts that actually
+rose:
+
+```{r}
+df_test %>%
+  mutate(logistic = as.integer(pred_prob > 0.5) == rising,
+         forest   = as.integer(pred_rf_class == "Rise") == rising,
+         predicted_rise = pred_prob > 0.5) %>%
+  group_by(year) %>%
+  summarise(districts = n(),
+            share_rising = mean(rising),
+            logistic_predicted_rising = mean(predicted_rise),
+            logistic_accuracy = mean(logistic),
+            forest_accuracy = mean(forest)) %>%
+  mutate(across(-c(year, districts), ~ round(.x, 3))) %>%
+  knitr::kable(caption = "Test accuracy by year (the class is the following year against this one)")
+```
+
+The logistic regression's best years are 2022 and 2023 (70% and 76%): it
+predicted a fall for most districts and most districts fell. Its worst is
+2024 (48%): it predicted a rise for 15% of districts and 61% rose. In 2020
+it split the districts evenly when 87% were about to rise. The model does
+well while a downturn it can see in each district's own numbers is still
+running, and badly at the turning points, which arrive for the whole
+country at once and for reasons that are not in a district's consent
+record.
+
+And by the size of the district, in three equal groups from the fewest
+dwellings a year to the most:
+
+```{r}
+df_test %>%
+  mutate(size = cut(log_dwell, breaks = quantile(log_dwell, c(0, 1/3, 2/3, 1)),
+                    labels = c("smallest third", "middle third", "largest third"),
+                    include.lowest = TRUE),
+         logistic = as.integer(pred_prob > 0.5) == rising,
+         forest   = as.integer(pred_rf_class == "Rise") == rising,
+         rule     = rule_reversion == rising) %>%
+  group_by(size) %>%
+  summarise(district_years = n(),
+            median_dwellings = median(dwellings),
+            rule_of_thumb_accuracy = mean(rule),
+            logistic_accuracy = mean(logistic),
+            forest_accuracy = mean(forest)) %>%
+  mutate(across(c(rule_of_thumb_accuracy, logistic_accuracy, forest_accuracy), ~ round(.x, 3))) %>%
+  knitr::kable(caption = "Test accuracy by district size")
+```
+
+The logistic regression is most accurate in the smallest districts (65%)
+and least in the largest (59%). That is the wrong way round for usefulness:
+in a district that consents a few dozen dwellings a year, the change from
+one year to the next is mostly chance, chance does not repeat, and so a
+model built on mean reversion looks clever. Where the numbers are large
+enough for a change to mean something, the model has less to offer. The
+forest's figures jump about from one third to the next; each third is 134
+rows, so its accuracy has a standard error of about four points.
+
+## Is the test period typical?
+
+Six test years are six draws of the national cycle, and section 2.1 showed
+they were unusual ones. The training years can be used to ask how the same
+models would have done in other periods: fit on four of the five blocks of
+years used for boosting, score on the fifth, and repeat. Each block is a
+set of years the model has not seen, so each score is an estimate of
+forecasting accuracy in a different era.
+
+```{r}
+# fit on four blocks of training years, score on the fifth
+block_cv <- map_dfr(1:5, function(k) {
+  train_k <- df_train[fold_id != k, ]
+  valid_k <- df_train[fold_id == k, ]
+  acc <- function(pred_class) mean(pred_class == valid_k$rising)
+
+  fit_log <- glm(formula(logreg.fit), data = train_k, family = binomial)
+  fit_lda <- lda(direction ~ ., data = train_da[fold_id != k, ])
+  fit_qda <- qda(direction ~ ., data = train_da[fold_id != k, ])
+  set.seed(462)
+  fit_rf  <- randomForest(direction ~ ., data = train_tree[fold_id != k, ], mtry = 3, ntree = 500)
+
+  tibble(years = paste(min(valid_k$year), max(valid_k$year), sep = "-"),
+         rows = nrow(valid_k),
+         share_rising = mean(valid_k$rising),
+         rule_opposite = acc(as.integer(valid_k$g1 <= 0)),
+         rule_3yr_average = acc(as.integer(valid_k$dev3 < 0)),
+         logistic = acc(as.integer(predict(fit_log, newdata = valid_k, type = "response") > 0.5)),
+         LDA = acc(as.integer(predict(fit_lda, newdata = train_da[fold_id == k, ])$class == "Rise")),
+         QDA = acc(as.integer(predict(fit_qda, newdata = train_da[fold_id == k, ])$class == "Rise")),
+         forest = acc(as.integer(predict(fit_rf, newdata = train_tree[fold_id == k, ]) == "Rise")))
+})
+
+# the five blocks pooled (weighted by rows), and the test set beside them
+pooled <- block_cv %>%
+  summarise(years = "1995-2018 pooled", across(-c(years, rows), ~ weighted.mean(.x, rows)),
+            rows = sum(rows))
+
+test_row <- tibble(years = "2019-2024 (test set)", rows = nrow(df_test),
+                   share_rising = mean(df_test$rising),
+                   rule_opposite = mean(rule_opposite == df_test$rising),
+                   rule_3yr_average = mean(rule_reversion == df_test$rising),
+                   logistic = mean(as.integer(pred_prob > 0.5) == df_test$rising),
+                   LDA = mean(as.integer(prob_lda > 0.5) == df_test$rising),
+                   QDA = mean(as.integer(prob_qda > 0.5) == df_test$rising),
+                   forest = mean(as.integer(pred_rf_class == "Rise") == df_test$rising))
+
+bind_rows(block_cv, pooled, test_row) %>%
+  mutate(across(-c(years, rows), ~ round(.x, 3))) %>%
+  knitr::kable(caption = "Accuracy on blocks of years the model was not fitted on, and on the test set")
+```
+
+```{r}
+# the same check for the logistic regression without nat_g1
+cv_without <- sapply(1:5, function(k) {
+  fit <- glm(update(formula(logreg.fit), . ~ . - nat_g1), data = df_train[fold_id != k, ], family = binomial)
+  sum(as.integer(predict(fit, newdata = df_train[fold_id == k, ], type = "response") > 0.5) ==
+        df_train$rising[fold_id == k])
+})
+cat("Logistic regression without nat_g1, five blocks pooled:",
+    round(sum(cv_without) / nrow(df_train), 3), "\n")
+```
+
+On earlier years the picture is weaker than on the test set, for the rules
+and for every model.
+
+- The mean-reversion rule that scored 58.5% on the test years scores 51.3%
+  over 1995–2018, and is below 50% in two of the five blocks. Its test
+  score was a feature of those six years — a boom followed by a bust is
+  exactly when "what went up will come down" works — and not a property of
+  the rule.
+- Logistic regression averages 54.8% (LDA 54.6%, QDA 53.8%, the forest
+  55.3%) and ranges from 47% to 66% by block. In two of the five eras it
+  would have done worse than a coin.
+- The gain from modelling over the pencil rule is about the same in both
+  places, three to four points. What changes between the test years and the
+  earlier ones is the level, for everything.
+
+So the honest statement of how well a district's consent record forecasts
+its direction is not 61%. It is about 55% on average, and anywhere from 47%
+to 66% depending on the period, with the test years at the favourable end.
+
+The second chunk is about `nat_g1`. Over the five blocks the logistic
+regression is right 57.2% of the time *without* it and 54.8% with it; on
+the test set it is the other way round, by a point and a half (next
+section). A feature with 24 distinct values in training is easy to overfit,
+and this is what that looks like: it helps in some periods and hurts in
+others. It stays in the headline model, as decided before the results were
+seen, but it should not be described as a predictor that works.
+
+## Sensitivity checks
+
+Three things we decided could have gone another way. Each is re-run with
+logistic regression, LDA and a random forest (on the features alone, no
+`region`, so that the rows are comparable).
+
+```{r}
+# refit three of the models on a different set of rows or features and score them on its test rows
+refit <- function(label, train, test, feats) {
+  rhs <- paste(feats, collapse = " + ")
+
+  fit_log  <- glm(as.formula(paste("rising ~", rhs)), data = train, family = binomial)
+  prob_log <- predict(fit_log, newdata = test, type = "response")
+
+  fit_lda  <- lda(as.formula(paste("direction ~", rhs)), data = train)
+  prob_lda <- predict(fit_lda, newdata = test)$posterior[, "Rise"]
+
+  set.seed(462)
+  fit_rf  <- randomForest(as.formula(paste("direction ~", rhs)), data = train, mtry = 3, ntree = 500)
+  prob_rf <- predict(fit_rf, newdata = test, type = "prob")[, "Rise"]
+
+  acc <- function(prob) mean(as.integer(prob > 0.5) == test$rising)
+  auc_here <- function(prob) as.numeric(auc(roc(test$rising, prob, levels = c(0, 1),
+                                                direction = "<", quiet = TRUE)))
+
+  tibble(run = label, train_rows = nrow(train), test_rows = nrow(test),
+         test_share_rising = mean(test$rising),
+         best_rule = mean(as.integer(test$dev3 < 0) == test$rising),
+         logistic = acc(prob_log), logistic_AUC = auc_here(prob_log),
+         LDA = acc(prob_lda), forest = acc(prob_rf), forest_AUC = auc_here(prob_rf))
+}
+
+big_move <- function(d) d %>% dplyr::filter(abs(change) >= log(1.10))
+
+sensitivity <- bind_rows(
+  refit("Headline: 9 features, all rows", df_train, df_test, features),
+  refit("Without nat_g1", df_train, df_test, setdiff(features, "nat_g1")),
+  refit("With relative cost per m2 added", drop_na(df_train, rel_cost), drop_na(df_test, rel_cost),
+        c(features, "rel_cost")),
+  refit("Moves of more than 10% only", big_move(df_train), big_move(df_test), features)
+)
+
+sensitivity %>%
+  mutate(across(-c(run, train_rows, test_rows), ~ round(.x, 3))) %>%
+  knitr::kable(caption = "Sensitivity checks: test accuracy (and AUC) under three alternative choices")
+```
+
+```{r}
+# how small the typical move is
+cat("Median size of next year's move, as a log change:", round(median(abs(df$change)), 3), "\n")
+cat("Share of district-years that moved less than 10% either way:",
+    round(mean(abs(df$change) < log(1.10)), 3), "\n")
+```
+
+- **Without `nat_g1`.** Test accuracy falls by a point or two for all three
+  models (logistic regression 60.0% from 61.4%). Section 6.4 found the
+  opposite on earlier years. Either way the feature moves the result by
+  less than the noise in a 402-row test set.
+- **With cost per m² added.** No gain: 59.9% for both logistic regression
+  and LDA. What a district's houses cost relative to the rest of the country
+  says nothing about which way its consents will move, which keeps this
+  question cleanly apart from RQ1.
+- **Large moves only.** Dropping the district-years that moved by less than
+  10% either way — 26% of all rows — lifts logistic regression to 65.2% and
+  its AUC to 0.69. So part of the difficulty is the class itself: a quarter
+  of district-years barely move, and whether a 3% change counts as a rise
+  or a fall is close to chance. But only part: with the small moves gone,
+  the models are still wrong one time in three.
+
+## Which features matter
+
+Three rankings side by side: the size of each logistic coefficient per
+standard deviation, the random forest's mean decrease in accuracy when the
+feature is shuffled, and boosting's relative influence.
+
+```{r}
+rf_imp  <- importance(rf.tree)[, "MeanDecreaseAccuracy"]
+gbm_inf <- summary(boost.fit, plotit = FALSE)
+gbm_inf <- setNames(gbm_inf$rel.inf, as.character(gbm_inf$var))
+
+tibble(feature = c(features, "region")) %>%
+  mutate(logistic_per_sd = c(std_coef[features], NA),
+         forest_accuracy_drop = rf_imp[feature],
+         boosting_influence = gbm_inf[feature],
+         rank_logistic = rank(-abs(logistic_per_sd), na.last = "keep"),
+         rank_forest   = rank(-forest_accuracy_drop),
+         rank_boosting = rank(-boosting_influence)) %>%
+  arrange(rank_forest) %>%
+  mutate(across(c(logistic_per_sd, forest_accuracy_drop, boosting_influence), ~ round(.x, 2))) %>%
+  knitr::kable(caption = "Feature importance: three models, three measures")
+```
+
+The three measures do not agree on an order, which is itself a sign that no
+feature is doing much. They do agree on a short list. `h2_h1` — did the
+year finish stronger than it started — is in the top four of all three and
+first for boosting. `alt_share` is first for the logistic regression and
+fourth for both ensembles. `nat_g1` is first or second for the two
+ensembles and seventh for the logistic regression: a tree can use it as a
+label for particular years, splitting on single values, where a linear
+model can only use its slope — which is also how it gets overfitted. `cv5`
+and `nonres_share` are at or near the bottom of every list.
+
+`region` is last in the forest, where shuffling it makes the forest no
+worse, and seventh for boosting. In RQ1 location was the largest single
+part of the answer. Here it is none of it: where a district is says a great
+deal about what building costs there, and nothing about which way its
+consents will move next year.
+
+## Where this leaves RQ3
+
+The answer has three parts, each pointing at the table or figure behind it.
+
+Only slightly. On the outcomes of 2020 to 2025 the best models call the
+direction of a district's consents correctly 61% of the time (logistic
+regression and LDA, section 6.1), against 45% for always guessing the more
+common class and 58.5% for a rule that needs one subtraction. On five
+earlier blocks of years the same models average 55% and the rule 51%
+(section 6.4). The fair summary is that a district's own consent record
+beats a coin toss by about five points in an ordinary period and about ten
+in a boom-and-bust like 2019–2024, and that no model beats the best pencil
+rule by more than three or four.
+
+The reason is the national cycle. Two-thirds of district-years move the way
+most of the country moves (section 2.1), and nothing in a single district's
+record says which way that will be: the models are right in the years when
+a downturn already under way continues, and wrong at the turning points
+(section 6.3). What the models do learn is modest and makes sense — a
+district that grew this year is a little less likely to grow again, one
+that finished the year strongly is a little more likely to, and one doing
+relatively more work on existing homes has room to recover (section 3.2) —
+and it works best in the smallest districts, where the change from year to
+year is mostly chance (section 6.3).
+
+The method matters least, which is the conclusion of RQ1 again from a
+different kind of problem. Logistic regression, LDA, QDA, a random forest
+and boosting are within three points of each other on the test set, with
+AUCs between 0.60 and 0.63 (section 6.2), and LDA and logistic regression
+make the same call on 395 of 402 test rows. Location, which carried most of
+RQ1, carries nothing here (section 6.6).
+
+For the poster, the defensible line is: *next year's direction is mostly
+the national cycle; a district's own record adds a little, and the choice
+of model adds almost nothing.* Any accuracy quoted should be the pair — 61%
+on the test years, 55% on earlier years — and not the 61% alone. Niwesh's
+independent build reported 58% for this question at the 9 November meeting,
+inside the same band.
+
+::: {.boxNote}
+**Limitations.** The test set is six years, which is six draws of the
+national cycle, not 402 independent cases. The class treats a 1% change and
+a 50% change alike, and counts 52 exact ties as falls. Every feature comes
+from the consents data; the things that turn the national cycle — interest
+rates, migration, construction costs — are not in it, and with one value a
+year they would give a model about 24 points to learn from. `cv.tree()` and
+the forests' out-of-bag error use random folds, which flatter a model when
+districts move together. Consents record intentions to build, not completed
+buildings.
+:::
+
+**Sources.** Stats NZ, *Building consents issued: August 2026* (CC BY 4.0),
+via the district-quarter table built in Niwesh's Step 1 notebook. Methods
+and code patterns follow STAT462 Lab Modules 3 (logistic regression), 4
+(discriminant analysis), 5 (cross-validation) and 6 (tree-based methods).
+
+*End of document*

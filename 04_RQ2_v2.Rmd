@@ -1,0 +1,737 @@
+---
+title: "RQ2: What kinds of building markets does New Zealand have?"
+subtitle: "Building consents (Stats NZ, Aug 2026) — k-means and hierarchical clustering of district profiles"
+author: "Andrew Boulton — while True: learn(), Group 8, STAT462"
+output:
+  html_document:
+    toc: yes
+    number_sections: yes
+    toc_float: yes
+---
+
+```{=html}
+<style>
+.boxNote {
+background-color: lightblue;
+color: black;
+border: 2px solid black;
+margin: 5px;
+padding: 5px;
+font-style: italic;
+}
+</style>
+```
+
+```{r setup, include = FALSE}
+Sys.setenv(LANG = "en")
+knitr::opts_chunk$set(fig.align = 'center',
+                      out.width = '75%',
+                      message = FALSE,
+                      warning = FALSE)
+
+library(tidyverse)
+library(GGally)
+library(cluster)
+
+set.seed(462)
+
+# where the data lives: one line to change per machine (same folder as 03_RQ1.Rmd)
+data_root <- Sys.getenv("STAT462_RQ1_DATA", unset = "data")
+```
+
+The first research question of our project was supervised: it had a response, the cost per square metre of a new house, and the task was to predict it. This question has no response. *What kinds of building markets does New Zealand have?* asks whether districts fall into groups by the way they build, and nobody has labelled the districts for us. That makes it a clustering problem, the unsupervised technique of Module 7: group similar observations together using their features alone.
+
+The observations are New Zealand's districts (territorial authorities). Each is described by a profile of seven numbers built from ten years of building consents, 2016–2025. Lab Module 7 worked with the `flea` data, where the species of each beetle was known and could be compared casually with the clusters. We have no such ground truth, so there is nothing to compare our clusters against, and the last section spends its effort on a different question: how far the groups can be trusted.
+
+We use the two methods of the module in the order the lab takes them: $k$-means clustering, then hierarchical clustering with complete, single and group average linkage. Euclidean distance is the distance metric throughout, which is also the default of every function used. Sections 1 to 3 follow the lab step by step on our data. Section 4 is our own and describes the three market types.
+
+# Set up
+
+The data is the district-by-quarter table that RQ1 was built on, made by Niwesh's data preparation notebook from the Stats NZ file *Building consents by territorial authority (Monthly)*. It has one row for each district in each quarter.
+
+```{r}
+quarters <- read.csv(file.path(data_root, "rq1_district_quarter_full.csv"))
+
+dim(quarters)
+n_distinct(quarters$ta)
+range(quarters$yq)
+```
+
+9,715 rows and 43 columns: 67 districts in each of the 145 quarters from 1990Q2 to 2026Q2.
+
+Clustering needs one row per thing to be grouped, so the quarters of each district are summarised into one profile. The window is the ten most recent complete calendar years, 2016–2025. The profile has seven inputs. Each is a share, a rate or an average, never a total, so that a district is not set apart simply for being large.
+
+| Input | What it measures | How it is built |
+|---|---|---|
+| `multi_share` | How much of the new housing is not stand-alone houses | 1 − new houses ÷ new dwellings |
+| `retire_share` | How much is retirement-village units | retirement units ÷ new dwellings |
+| `house_m2` | How big the new houses are | floor area of new houses ÷ number of new houses, in m² |
+| `per1000` | How fast the district builds for its size | new dwellings per 1,000 residents per year, averaged over the window |
+| `growth` | Whether building sped up or slowed down within the window | log of dwellings per year in the later half ÷ the earlier half |
+| `alt_share` | How much residential work is on existing homes | alterations \$ ÷ (alterations \$ + new residential \$), in real dollars |
+| `rel_cost` | Whether it is dear or cheap to build there | log of the district's real \$/m² for new houses ÷ New Zealand's |
+
+The function below builds the profile for any window of years, because section 4 uses it again for two other windows.
+
+```{r}
+# one row per district for the years first_year to last_year
+build_profile <- function(first_year, last_year) {
+  mid_year <- (first_year + last_year) %/% 2
+
+  window <- quarters %>%
+    dplyr::filter(year >= first_year, year <= last_year) %>%
+    # put every dollar figure into June-2026 dollars before adding quarters up
+    mutate(alt_real    = resid_alt_val * real_factor,
+           new_real    = resid_new_val * real_factor,
+           houses_real = houses_val * real_factor)
+
+  # the national cost per m2 over the same window, for the relative cost
+  nz_cost_m2 <- sum(window$houses_real) / sum(window$houses_m2)
+
+  window %>%
+    group_by(ta, region) %>%
+    summarise(
+      dwellings    = sum(dwell_n),
+      multi_share  = 1 - sum(houses_n) / sum(dwell_n),
+      retire_share = sum(retire_n) / sum(dwell_n),
+      house_m2     = sum(houses_m2) / sum(houses_n),
+      # dwell_per_1000 is a rolling 12-month rate, so its December-quarter value is the calendar year
+      per1000      = mean(dwell_per_1000[quarter == 4]),
+      early        = sum(dwell_n[year <= mid_year]) / n_distinct(year[year <= mid_year]),
+      late         = sum(dwell_n[year >  mid_year]) / n_distinct(year[year >  mid_year]),
+      alt_share    = sum(alt_real) / (sum(alt_real) + sum(new_real)),
+      # the district's real cost per m2 against the country's, on a log scale
+      rel_cost     = log((sum(houses_real) / sum(houses_m2)) / nz_cost_m2),
+      .groups = "drop") %>%
+    mutate(growth = log((late + 1) / (early + 1)),
+           # short names for plots: "Selwyn District" -> "Selwyn"
+           district = str_remove(ta, " District$| City$| Territory$")) %>%
+    dplyr::select(district, ta, region, dwellings, multi_share, retire_share,
+                  house_m2, per1000, growth, alt_share, rel_cost)
+}
+```
+
+We build the profile for all 67 districts first, so that the relative cost is measured against the whole country, and then apply one rule about which districts are clustered.
+
+```{r}
+profile_all <- build_profile(2016, 2025)
+
+# the four smallest districts by new dwellings consented in the window
+profile_all %>%
+  arrange(dwellings) %>%
+  dplyr::select(district, dwellings) %>%
+  head(4)
+
+# all new dwellings consented in the window
+sum(profile_all$dwellings)
+
+# the rule: a district is clustered only if it consented at least this many
+min_dwellings <- 100
+
+profile <- profile_all %>%
+  dplyr::filter(dwellings >= min_dwellings)
+
+dim(profile)
+```
+
+Two districts fall under the line, the Chatham Islands with 34 new dwellings in ten years and Kawerau with 92. 65 districts remain.
+
+::: {.boxNote}
+**The rule.** A district is clustered only if it consented at least 100 new dwellings in the profile window, 2016–2025. The profile's shares are dwellings divided by dwellings, and below 100 dwellings a single dwelling moves such a share by more than one percentage point: 2.9 points at 34 dwellings and 1.1 at 92. A profile like that describes a handful of buildings more than a market. The rule removes the Chatham Islands (34) and Kawerau (92), together 126 of the 377,199 new dwellings consented in the window. The next smallest district is Wairoa with 151, so no district sits close to the line. The test is made once, on this window, and the same 65 districts are used in every later run. Applied again to another window it would change the set of districts (section 4.6).
+:::
+
+The seven inputs go into a plain data frame with the district name as the row name, which `kmeans()` and the dendrograms will use as labels.
+
+```{r}
+inputs <- c("multi_share", "retire_share", "house_m2", "per1000", "growth", "alt_share", "rel_cost")
+
+dat <- as.data.frame(profile[, inputs])
+rownames(dat) <- profile$district
+
+summary(dat)
+```
+
+65 districts and seven inputs. The summary already shows that the inputs are on very different scales, which matters in section 2.1.
+
+::: {.boxNote}
+**What differs from Lab Module 7, and why.**
+
+- *No ground truth.* The lab compares its clusters with the known species. Districts have no known type, so the lab's "Ground Truth" plots have no counterpart here.
+- *Seven inputs, not two.* The clusters are formed on all seven inputs, and every cluster plot shows them on two, `per1000` and `multi_share`. The plots therefore use a two-column copy of the data, `plot_data`.
+- *The seed.* `set.seed(462)`, the project's seed, where the lab uses 1. It is set before every `kmeans()` call so that the document knits to the same numbers each time.
+- *`nstart = 20`*, as in the lab. Checked when this notebook was built: thirty different seeds all return the same three clusters on the scaled data.
+- *Types are named, not numbered* (section 4), because `kmeans()` numbers its clusters in no particular order.
+- *Functions Lab 7 does not use.* The data has to be built before it can be clustered. That needs `read.csv()` and the `dplyr` verbs of Lab 1 (`group_by()`, `summarise()`, `mutate()`, `filter()`, `select()`), with `arrange()` and `head()` to show the smallest districts. `table()`, `apply()`, `sapply()`, `range()`, `which.min()` and `setdiff()` are used as in Labs 1 to 6. Nine are in no course lab. `n_distinct()` counts distinct values and `str_remove()` shortens the district names. `%/%` is whole-number division, used once for the middle year of a window. `rownames()` puts the district names on the trees. `ggpairs()` gives the one picture of all seven inputs together. `which.max()` is the twin of `which.min()`. `file.path()` and `Sys.getenv()` make the one-line data path, and `dir.create()` makes the folder that `write.csv()` saves the result into.
+:::
+
+One more look before clustering, which the lab does not need with two variables: how the seven inputs relate to each other.
+
+```{r, fig.height = 8, out.width = '100%'}
+ggpairs(dat)
+```
+
+The strongest relationship is between `per1000` and `alt_share`, with a correlation of −0.67: districts that build a lot for their size spend little of their residential money on existing homes. `multi_share` and `rel_cost` are related at 0.47, so denser building goes with dearer building. No pair of inputs splits the districts into separate clouds.
+
+For the plots we use two of the seven inputs, one from each of those relationships: `per1000` and `multi_share`. This is the picture clustering starts from.
+
+```{r}
+
+plot_data <- dat[, c("per1000", "multi_share")]
+
+
+ggplot(data = plot_data, mapping = aes(x = per1000, y = multi_share)) +
+  geom_point(size = 3.0) +
+  labs(
+    title = "Cluster Data"
+  ) +
+  theme_grey()
+
+```
+
+There are no gaps. The districts form one cloud that thins out upwards, towards the districts with the most multi-unit housing, and to the right, where a few districts build far faster than the rest.
+
+We will draw this plot many times, coloured by a clustering result, so we use the plotting function of the lab.
+
+```{r}
+
+# the plotting function of Lab Module 7: the first two columns of data, coloured by label
+plot_func <- function(data, label, title = "") {
+
+  data$label <- factor(label)
+
+  x_col <- colnames(data)[1]
+  y_col <- colnames(data)[2]
+  label <- colnames(data)[3]
+
+
+  p <- data %>%
+    ggplot(data = ., mapping = aes(x = .data[[x_col]], y = .data[[y_col]], color = .data[[label]])) +
+    scale_color_manual(values = c("#00AFBB", "#FC4E07", "#e7b800", "#006400", "#9400D3", "#FF8C00","#008080")) +
+    geom_point(size = 3.0, alpha = 0.7) +
+    labs(
+      title = title,
+      x = x_col, y = y_col, color = "Cluster Result"
+    ) +
+    theme_grey()
+  return(p)
+}
+
+```
+
+# k-means Clustering
+
+$k$-means clustering divides the observations into $k$ clusters that do not overlap. The algorithm:
+
+- Choose the number of clusters $k$;
+- Assign every district to one of the $k$ clusters at random;
+- Compute the centre of each cluster, move every district to the cluster whose centre is nearest, and repeat until no district changes cluster.
+
+Our pitch asked about market *types* and the group has worked with three, so we start with $k = 3$ and come back to the choice of $k$ in section 2.2. As in the lab, the first run uses the inputs as they are.
+
+```{r}
+set.seed(462)
+
+k.clus <- kmeans(dat, 3)
+
+plot_func(plot_data, k.clus$cluster, "k-means clustering result")
+
+```
+
+The colours are mixed across the whole plot. On these two inputs the clusters do not look like groups at all, which is a first sign that something else is deciding them. Printing the model shows what.
+
+```{r}
+k.clus
+
+k.clus$tot.withinss
+```
+
+The output gives the cluster sizes (11, 33 and 21 districts), the cluster means and the cluster each district was put in. The means show what these clusters are: they differ by 45 m² in `house_m2` (155, 183 and 200) and by small amounts in everything else. The total within-cluster sum of squares (`tot.withinss`) is the quantity $k$-means minimises: the squared distance from each district to the centre of its cluster, added up over all clusters, $$\sum_{k=1}^{K} \sum_{C(i) = k} \| x_i - \bar{x}_k \|^2 . $$
+
+The algorithm cannot try every possible grouping. It stops at a local minimum, and which one it reaches depends on the random start. `nstart = 20` makes the result robust to that by running the algorithm from 20 starts and keeping the best.
+
+```{r}
+set.seed(462)
+
+k.clus <- kmeans(dat, 3, nstart = 20)
+
+plot_func(plot_data, k.clus$cluster, title = "k-means clustering result")
+
+k.clus$tot.withinss
+```
+
+The total within-cluster sum of squares is 4,333, down from 4,343 for the single start, so the first run had not found the best grouping. With 20 starts the result is stable.
+
+## Scaling
+
+Even the best result with these inputs is a grouping by house size. The reason is the scale of the inputs.
+
+```{r}
+apply(dat, 2, range)
+```
+
+`house_m2` runs from 130 to 211, a range of about 80. `per1000` has a range of about 26, and the other five inputs have ranges below 2. $k$-means works on distances, and with the inputs on these scales almost all of the distance between two districts comes from house size. To let the seven inputs contribute equally we standardise them: `scale()` subtracts the mean of each column and divides by its standard deviation.
+
+```{r}
+set.seed(462)
+
+scaled_dat <- scale(dat)
+
+k.clus <- kmeans(scaled_dat, 3, nstart = 20)
+
+plot_func(plot_data, k.clus$cluster, title = "k-means clustering result")
+
+k.clus$size
+```
+
+Now the clusters can be read on the plot. One, of 25 districts, sits at the bottom left: low building rates and, for most of them, little multi-unit housing. One, of 14, lies across the top: the most multi-unit housing. One, of 26, is to the right of the first: faster building. They still overlap where the cloud is thickest, because the plot shows two of the seven inputs and all seven had a say. This is the clustering the rest of the document works with.
+
+In the lab the scaled result matched the ground truth exactly. We have no ground truth, and we do not know that three is the right number of clusters either. We need a way to assess a clustering from the data alone.
+
+## Silhouette coefficient
+
+The quantity $k$-means minimises cannot be used to choose $k$, because the total within-cluster variation falls every time a cluster is added. Plotting $1 - \frac{tot.withinss}{totss}$ against the number of clusters shows it.
+
+```{r}
+set.seed(462)
+
+kmeans.criterion <- rep(0,7)
+for (k in 2:8) {
+  clus <- kmeans(scaled_dat, k, nstart = 20)
+  kmeans.criterion[k-1] <- 1 - clus$tot.withinss / clus$totss
+}
+
+
+plot_dat <- data.frame(
+  k = 2:8,
+  kmeans_criterion = kmeans.criterion
+)
+
+ggplot(plot_dat, aes(x = k, y = kmeans_criterion)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "k-means criterion VS k",
+    x = "Number of Clusters (k)",
+    y = "1 - tot.withinss/totss"
+  ) +
+  theme_grey()
+
+plot_dat
+```
+
+The criterion rises with every extra cluster, from 0.25 at $k = 2$ to 0.64 at $k = 8$, and it would reach 1 with 65 clusters of one district each. It cannot tell us when to stop.
+
+The silhouette coefficient can. It suits distance-based methods like the two used here, and it measures two things for every district $x_j$. **Cohesion** is the mean distance to the other members of its own cluster, $a(x_j) = \text{mean} \left\{ \| x_i - x_j \| : C_i = C_j \right\}$. **Separation** is the mean distance to the members of the nearest other cluster, $b(x_j) = \text{min}_{k \neq C_j}\text{mean}\left\{\|x_i-x_j\|: C_i = k\right\}$. The silhouette coefficient of the district is $$s(x_j) = \frac{b(x_j)-a(x_j)}{\max\left\{a(x_j),b(x_j)\right\}}, $$ and the silhouette coefficient of a clustering $C$ is the average over all districts, $$S(C) = \text{mean}\left\{s(x_j), j=1,...,n\right\}.$$ It runs from −1 to 1. Near 1, a district is far closer to its own cluster than to any other. Near 0, it sits on the boundary between two clusters. Below 0, it is on average closer to another cluster than to its own.
+
+`silhouette()` from the `cluster` package does the computing. It needs the cluster of each district and a distance matrix, which `dist()` provides. Printing the result gives one row per district: its cluster, the nearest other cluster, and its silhouette coefficient.
+
+```{r}
+dist_matrix <- dist(scaled_dat)
+
+sil <- silhouette(k.clus$cluster, dist_matrix)
+
+sil
+```
+
+The `summary()` gives the size and the average silhouette coefficient of each cluster. The `Mean` of the individual coefficients is the silhouette coefficient of the whole clustering.
+
+```{r}
+summary(sil)
+```
+
+The cluster averages are 0.02 for the cluster of 14, 0.29 for the cluster of 25 and 0.25 for the cluster of 26, and the coefficient of the clustering is 0.21. The same number can be taken directly from `avg.width`.
+
+```{r}
+summary(sil)$avg.width
+```
+
+Now the same for every $k$ from 2 to 8.
+
+```{r}
+set.seed(462)
+
+sils <- rep(0,7)
+for (k in 2:8) {
+  clus <- kmeans(scaled_dat, k, nstart = 20)
+  sil <- silhouette(clus$cluster, dist_matrix)
+  avg_sil <- summary(sil)$avg.width
+  sils[k-1] <- avg_sil
+}
+
+
+plot_dat <- data.frame(
+  k = 2:8,
+  sils = sils
+)
+
+ggplot(plot_dat, aes(x = k, y = sils)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "Silhouette coefficient VS k",
+    x = "Number of clusters (k)",
+    y = "Silhouette coefficient"
+  ) +
+  theme_grey()
+
+plot_dat
+```
+
+The lab ends this section by reading the highest point of the curve as the most appropriate number of clusters. Read that way, our curve says two, not three: the silhouette coefficient is 0.230 at $k = 2$ and 0.213 at $k = 3$. Two more things have to be said before using it.
+
+First, the curve is flatter than the plot makes it look. The vertical axis of the plot runs only from 0.19 to 0.23. The coefficient can take any value from −1 to 1, and it stays between 0.19 and 0.23 for every $k$ from 2 to 8. In the lab it peaked sharply at the true number of species. Here the data does not single out any number of clusters.
+
+Second, it is low everywhere. Kaufman and Rousseeuw (1990), who introduced the coefficient, read a best average of 0.25 or less as no substantial structure. The districts are one cloud, as the first plot suggested, and any $k$ is a way of dividing that cloud, not a count of types that exist in it.
+
+We report three clusters, and the reasons are ours, not the silhouette's. The cross-table shows what two clusters would be.
+
+```{r}
+set.seed(462)
+
+k.clus2 <- kmeans(scaled_dat, 2, nstart = 20)
+
+table(k2 = k.clus2$cluster, k3 = k.clus$cluster)
+```
+
+With two clusters, the cluster of 25 stays whole and is joined by one district from the cluster of 14. The other 39 districts are simply everything else. So $k = 2$ separates one group from the rest, and $k = 3$ keeps that group and divides the rest in two. That division is what our question is about, because it separates how much a district builds from what it builds. Three types are what the group pitched, and the group that $k = 2$ finds is there either way. Section 4 names the three clusters and checks how far each can be trusted.
+
+# Hierarchical Clustering
+
+Hierarchical clustering works differently. It does not need the number of clusters in advance. It builds a hierarchy from which any number of clusters between 1 and 65 can be read:
+
+- Start with every district as its own cluster;
+- Merge the two closest clusters, and repeat until all districts are in one cluster.
+
+The distance between two districts is the Euclidean distance on the scaled inputs, the `dist_matrix` computed above. A cluster usually holds more than one district, so the method also needs a rule for the distance between two clusters. Module 7 covers three: **complete linkage**, **single linkage** and **group average linkage**. We apply each in turn and cut every tree into three clusters, to compare with $k$-means.
+
+## Complete linkage
+
+In complete linkage, the distance between two clusters is the largest distance between a district in one and a district in the other: $$ d(C_k, C_l) = \max_{i,j} \left\{ \| x_i - x_j \| : C(i) = k, C(j) = l \text{ with } k \neq l \right\}$$
+
+`hclust()` from base R performs hierarchical clustering. It takes the distance matrix, and `method = "complete"` selects the linkage.
+
+```{r, fig.width = 13, fig.height = 6.5, out.width = '100%'}
+# perform hierarchical clustering
+hc.complete <- hclust(dist_matrix, method = "complete")
+plot(hc.complete, main = "Complete Linkage", xlab = "", sub = "", cex = 0.7)
+
+```
+
+The result is a dendrogram, an upside-down tree. Each district starts as a leaf at the bottom, and two branches join at the height that is the distance between the clusters being merged. Cutting the tree with a horizontal line at any height gives a set of clusters. `rect.hclust()` draws the clusters for a chosen number, here three.
+
+```{r, fig.width = 13, fig.height = 6.5, out.width = '100%'}
+plot(hc.complete, main = "Complete Linkage", xlab = "", sub = "", cex = 0.7)
+# Specify a chosen number of clusters
+rect.hclust(hc.complete, k = 3, border = "red")
+```
+
+`cutree()` returns the cluster of each district for the same cut.
+
+```{r}
+cut.complete <- cutree(hc.complete, 3)
+
+table(cut.complete)
+
+# cluster 1 is the large one: these are the members of the other two
+names(cut.complete)[cut.complete == 2]
+names(cut.complete)[cut.complete == 3]
+```
+
+```{r}
+plot_func(plot_data, cut.complete, "Complete Linkage")
+```
+
+Cut into three, complete linkage gives clusters of 55, 8 and 2 districts. The cluster of two is Queenstown-Lakes and Wellington City. The cluster of eight is Lower Hutt with seven provincial districts. The tree has not divided the country into three kinds of market. It has set aside the districts least like the others and left 55 in one cluster.
+
+## Single linkage
+
+In single linkage, the distance between two clusters is the smallest distance between a district in one and a district in the other: $$d(C_k, C_l) = \min_{i,j} \left\{ \| x_i - x_j \| : C(i) = k, C(j) = l \text{ with } k \neq l \right\}$$
+
+Only the `method` changes.
+
+```{r, fig.width = 13, fig.height = 6.5, out.width = '100%'}
+hc.single <- hclust(dist_matrix, method = "single")
+plot(hc.single, main = "Single Linkage", xlab = "", sub = "", cex = 0.7)
+rect.hclust(hc.single, k = 3, border = "red")
+```
+
+```{r}
+cut.single <- cutree(hc.single, 3)
+
+table(cut.single)
+
+names(cut.single)[cut.single == 2]
+names(cut.single)[cut.single == 3]
+
+plot_func(plot_data, cut.single, "Single Linkage")
+```
+
+Single linkage gives 63, 1 and 1: Queenstown-Lakes and Wellington City each on their own, and every other district together. This is the chaining effect of single linkage. A district joins a cluster as soon as it is close to any one member, so the main cluster grows one district at a time and the tree looks like a staircase.
+
+## Group average linkage
+
+In group average linkage, the distance between two clusters is the average distance over every pair with one district in each: $$d(C_k, C_l) = \frac{\sum_{C(i) = k} \sum_{C(j) = l} \| x_i - x_j \|}{N_k N_l} \quad (k \neq l). $$
+
+It is a compromise between the other two: less given to chaining than single linkage, and less drawn to tight, compact clusters than complete linkage.
+
+```{r, fig.width = 13, fig.height = 6.5, out.width = '100%'}
+hc.average <- hclust(dist_matrix, method = "average")
+plot(hc.average, main = "Average Linkage", xlab = "", sub = "", cex = 0.7)
+rect.hclust(hc.average, k = 3, border = "red")
+```
+
+```{r}
+cut.average <- cutree(hc.average, 3)
+
+table(cut.average)
+
+names(cut.average)[cut.average == 2]
+names(cut.average)[cut.average == 3]
+
+plot_func(plot_data, cut.average, "Average Linkage")
+```
+
+Group average linkage makes the same cut as single linkage: 63, 1 and 1, with Queenstown-Lakes and Wellington City on their own.
+
+The profiles of those two districts show why every tree sets them apart.
+
+```{r}
+dat[c("Queenstown-Lakes", "Wellington"), ]
+```
+
+Queenstown-Lakes builds 27.6 new dwellings per 1,000 residents a year, the highest rate of the 65 districts, and Wellington City has the highest multi-unit share, 73%. They are the points at the far right and at the top of the cluster plots.
+
+The three trees agree with each other and not with $k$-means. None of them gives three groups of comparable size. Each spends its first cuts on the districts least like the rest and leaves most of the country in one cluster. That fits what the silhouette coefficient said: the districts are one cloud with a few outliers, not three separate clouds. For this data the trees are a cross-check and an outlier finder, and the three market types come from $k$-means.
+
+# The three market types
+
+Sections 1 to 3 followed the lab. This section is our own. It names the three $k$-means clusters, describes them, and asks how far each can be trusted.
+
+## Naming the types
+
+`kmeans()` numbers its clusters in whatever order it finds them, so cluster 1 in this run may be cluster 3 in another. To make the labels mean the same thing every time, we name the clusters by a rule. The cluster with the lowest mean `per1000` is **slow provincial**. Of the other two, the one with the higher mean `multi_share` is **urban multi-unit**. The third is **house-building**.
+
+```{r}
+# name three clusters by rule, so that the names do not depend on how kmeans() numbered them
+name_types <- function(cluster, data) {
+
+  # the mean building rate and the mean multi-unit share of each cluster
+  rate  <- sapply(1:3, function(k) mean(data$per1000[cluster == k]))
+  multi <- sapply(1:3, function(k) mean(data$multi_share[cluster == k]))
+
+  # slow provincial: the cluster that builds least for its size
+  slow <- which.min(rate)
+
+  # urban multi-unit: of the other two, the one with more multi-unit housing
+  others <- setdiff(1:3, slow)
+  urban  <- others[which.max(multi[others])]
+
+  # the third is house-building
+  type_names <- rep("house-building", 3)
+  type_names[slow]  <- "slow provincial"
+  type_names[urban] <- "urban multi-unit"
+
+  return(type_names[cluster])
+}
+
+profile$type <- name_types(k.clus$cluster, dat)
+
+table(profile$type)
+```
+
+25 slow provincial districts, 14 urban multi-unit and 26 house-building.
+
+## What each type builds
+
+The mean of each input by type, in the original units, with the number of districts and the new dwellings they consented in the ten years.
+
+```{r}
+type_means <- profile %>%
+  group_by(type) %>%
+  summarise(districts    = n(),
+            dwellings    = sum(dwellings),
+            per1000      = mean(per1000),
+            multi_share  = mean(multi_share),
+            retire_share = mean(retire_share),
+            house_m2     = mean(house_m2),
+            growth       = mean(growth),
+            alt_share    = mean(alt_share),
+            rel_cost     = mean(rel_cost))
+
+print(as.data.frame(type_means), digits = 3)
+
+# each type's share of the new dwellings, and its cost against the country, in percent
+data.frame(type           = type_means$type,
+           dwelling_share = round(100 * type_means$dwellings / sum(type_means$dwellings), 1),
+           cost_vs_nz     = round(100 * (exp(type_means$rel_cost) - 1), 1))
+```
+
+- **Slow provincial (25 districts).** 3.4 new dwellings per 1,000 residents a year, the lowest rate. 23% of residential spending goes on existing homes, the highest share. The smallest houses, 175 m², and nearly all of them stand-alone (16% multi-unit, 2% retirement units). The cheapest to build in: 7% below the national cost per m². Building did pick up within the window, by about 40% between its two halves (a mean `growth` of 0.34 on the log scale), from a low base. Together these 25 districts consented 6% of the new dwellings.
+- **Urban multi-unit (14).** 48% of new dwellings are not stand-alone houses, and 9% are retirement-village units. The dearest: 7% above the national cost per m². These 14 districts consented 69% of the new dwellings. Their mean building rate, 7.7 per 1,000, is pulled up by Queenstown-Lakes.
+- **House-building (26).** 8.5 new dwellings per 1,000 residents a year, the highest rate, in the biggest houses, 192 m². The smallest share of spending on existing homes, 13%. Mostly stand-alone houses, with a multi-unit share of 0.165, close to the slow type's. 3% below the national cost per m². 24% of the new dwellings.
+
+## Which districts
+
+```{r}
+profile$district[profile$type == "slow provincial"]
+profile$district[profile$type == "urban multi-unit"]
+profile$district[profile$type == "house-building"]
+```
+
+The slow provincial type holds the West Coast, Southland and Clutha, the centre and the east of the North Island (Ruapehu, Rangitikei, Tararua, Wairoa, Gisborne), and three cities, Dunedin, Invercargill and Rotorua. The urban multi-unit type holds Auckland, Hamilton, Tauranga, Wellington with the Hutt Valley, Porirua and the Kapiti Coast, Christchurch, Napier and Hastings, Nelson, Horowhenua and Queenstown-Lakes. The house-building type holds the districts around the big cities (Selwyn and Waimakariri, Waikato and Waipa, Western Bay of Plenty) and districts such as Central Otago, Tasman, Thames-Coromandel and Taupo.
+
+## How well each district fits
+
+Section 2.2 gave one silhouette coefficient for the whole clustering. The coefficient of each district shows which types hold together. The loop in section 2.2 reused the name `sil`, so it is computed again here.
+
+```{r}
+sil <- silhouette(k.clus$cluster, dist_matrix)
+
+profile$sil <- sil[, "sil_width"]
+
+profile %>%
+  group_by(type) %>%
+  summarise(districts  = n(),
+            mean_sil   = mean(sil),
+            below_zero = sum(sil < 0))
+
+profile$district[profile$sil < 0]
+```
+
+The slow provincial type averages 0.29 and the house-building type 0.25, with no district below zero in either. The urban multi-unit type averages 0.02, and six of its fourteen districts are below zero: Hastings, Horowhenua, Kapiti Coast, Porirua, Queenstown-Lakes and Tauranga. Each of those is on average closer to the districts of another type than to its own. The urban multi-unit type is a label for one end of the cloud, not a tight cluster. The slow provincial type is the firm one.
+
+## Is it cost that makes the types?
+
+Cost is one of the seven inputs. So the statement that the urban type is dearer and the slow type cheaper describes how the types were formed. It is not a finding about them. The check that is not circular is to form the types without cost and look at cost afterwards.
+
+```{r}
+# the same 65 districts without the cost input
+dat_nocost <- dat[, colnames(dat) != "rel_cost"]
+
+set.seed(462)
+
+k.clus_nocost <- kmeans(scale(dat_nocost), 3, nstart = 20)
+type_nocost <- name_types(k.clus_nocost$cluster, dat_nocost)
+
+table(headline = profile$type, cost_out = type_nocost)
+sum(profile$type == type_nocost)
+
+# cost against the country, in percent, for the types formed without cost
+profile %>%
+  mutate(type_nocost = type_nocost) %>%
+  group_by(type_nocost) %>%
+  summarise(districts  = n(),
+            cost_vs_nz = round(100 * (exp(mean(rel_cost)) - 1), 1))
+```
+
+Without the cost input, 50 of the 65 districts keep their type. The slow provincial type hardly changes: 23 of its 25 districts stay. The types formed this way still differ in cost, in one respect. The slow provincial districts are 7% below the national cost per m², and the other two types are both level with it. So the gap between slow provincial districts and the rest is there whether or not cost is used to form the types. The gap between urban and house-building districts appears only when cost is an input. The line between those two is also where the districts move: 12 house-building districts become urban when cost is left out.
+
+## Do the types depend on the years chosen?
+
+A market type should be a lasting feature of a district. We build the profile again for a longer window, 2011–2025, and for the last five years alone, 2021–2025, cluster the same 65 districts in the same way, and count how many keep their type.
+
+```{r}
+profile_long_all <- build_profile(2011, 2025)
+
+# the three smallest districts over this window: the rule is not applied again
+profile_long_all %>%
+  arrange(dwellings) %>%
+  dplyr::select(district, dwellings) %>%
+  head(3)
+
+# the same 65 districts, in the same order
+profile_long <- profile_long_all %>%
+  dplyr::filter(ta %in% profile$ta)
+all(profile_long$ta == profile$ta)
+
+dat_long <- as.data.frame(profile_long[, inputs])
+
+set.seed(462)
+
+k.clus_long <- kmeans(scale(dat_long), 3, nstart = 20)
+type_long <- name_types(k.clus_long$cluster, dat_long)
+
+table(headline = profile$type, window_2011_25 = type_long)
+sum(profile$type == type_long)
+```
+
+```{r}
+profile_recent_all <- build_profile(2021, 2025)
+
+profile_recent_all %>%
+  arrange(dwellings) %>%
+  dplyr::select(district, dwellings) %>%
+  head(3)
+
+profile_recent <- profile_recent_all %>%
+  dplyr::filter(ta %in% profile$ta)
+all(profile_recent$ta == profile$ta)
+
+dat_recent <- as.data.frame(profile_recent[, inputs])
+
+set.seed(462)
+
+k.clus_recent <- kmeans(scale(dat_recent), 3, nstart = 20)
+type_recent <- name_types(k.clus_recent$cluster, dat_recent)
+
+table(headline = profile$type, window_2021_25 = type_recent)
+sum(profile$type == type_recent)
+
+# the urban multi-unit districts that change type on this window
+profile$district[profile$type == "urban multi-unit" & type_recent != "urban multi-unit"]
+```
+
+With the 15-year window 56 of the 65 districts keep their type, and with the last five years 48. The slow provincial type is again the steady one: 22 of its 25 districts keep it over 2011–2025 and 23 over 2021–2025. The movement is between the other two types. Over 2021–2025, nine house-building districts become urban and five urban districts become house-building, Auckland, Christchurch and Hamilton among them. Where the line falls between urban multi-unit and house-building depends on which years are looked at.
+
+The first table of each chunk is the reason the rule is applied once. Kawerau has 105 new dwellings over 2011–2025 and would pass the rule on that window. Wairoa has 103 over 2021–2025 and would only just pass it on that one.
+
+## Core districts
+
+A district is *core* if it has the same type in all four runs: the headline, without cost, 2011–2025 and 2021–2025.
+
+```{r}
+profile$core <- profile$type == type_nocost & profile$type == type_long & profile$type == type_recent
+
+table(profile$type, profile$core)
+sum(profile$core)
+```
+
+40 of the 65 districts are core: 21 of the 25 slow provincial districts, 8 of the 14 urban multi-unit and 11 of the 26 house-building. The type of the other 25 depends on the choices made in this notebook.
+
+## The answer to RQ2
+
+New Zealand's districts do not fall into separate kinds of building market. They form one cloud. The silhouette coefficient is between 0.19 and 0.23 for every number of clusters from 2 to 8 and is highest at two, and the three hierarchical trees set Queenstown-Lakes and Wellington City apart and leave the rest of the country together.
+
+Three types are still a useful way to describe that cloud. The slow provincial type is the firm one: 25 districts that build 3.4 dwellings per 1,000 residents a year and spend 23% of their residential money on existing homes, with a silhouette coefficient of 0.29, no district below zero and 21 of the 25 core. The other 40 districts divide into an urban multi-unit type (14 districts, 48% multi-unit, 69% of the new dwellings) and a house-building type (26 districts, 8.5 dwellings per 1,000, the biggest houses). That division is soft. The urban type has a silhouette coefficient of 0.02, and between 9 and 17 districts change type when cost is left out or the years are changed.
+
+The types connect to RQ1, which found that location matters more for the cost of a new house than any driver we could measure. Part of what location stands for is the kind of market a district is: slow provincial districts are about 7% cheaper per m² than the country, with or without cost among the inputs. The types should be presented as parts of a continuum: three named types, with the silhouette coefficient and the number of core districts beside them.
+
+::: {.boxNote}
+**Limitations.** There are 65 districts, so each type mean rests on 14 to 26 points. The seven inputs and the ten-year window are our choices, and with silhouette coefficients this low other reasonable choices move districts between types: 15 without the cost input and 17 with a five-year window. Auckland counts as one district of 65, although it is by far the largest. Consents record an intention to build, not a completed building. The two districts under the 100-dwelling rule are not given a type.
+:::
+
+**Sources.**
+
+Anthropic. (2026). *Claude* (Fable 5.2) [Large language model]. https://claude.ai
+
+Kaufman, L., & Rousseeuw, P. J. (1990). *Finding groups in data: An introduction to cluster analysis*. Wiley.
+
+Stats NZ. (2026). *Building consents issued: August 2026*. https://www.stats.govt.nz/information-releases/building-consents-issued-august-2026/
+
+University of Canterbury. (2026). *STAT462 Data Mining, Lab Module 7: Clustering (solution)* [Course material].
+
+The data is used under CC BY 4.0, through the district-by-quarter table built in Niwesh Baraj's data preparation notebook for this project. Sections 1 to 3 follow the structure, the object names and the plotting function of Lab Module 7.
+
+**Use of AI.** Claude (Anthropic, 2026) was used to draft the code and the text of this notebook from my design decisions and the Lab Module 7 solution, and to check its numbers. I have read and run it, and the decisions and conclusions are mine.
+
+The last chunk saves the result for the figures script. It is an output kept on my machine, not part of the submission.
+
+```{r}
+dir.create("../outputs/rq2", showWarnings = FALSE, recursive = TRUE)
+
+types_out <- profile[, c("district", "ta", "dwellings", inputs, "type", "sil", "core")]
+
+write.csv(types_out, "../outputs/rq2/rq2_types.csv", row.names = FALSE)
+```
+
+*End of document*

@@ -1,0 +1,181 @@
+--- a/building-consents/communication/slides/build_slides.py	2026-11-18 22:41:31.148354266 +1300
++++ b/building-consents/communication/slides/build_slides.py	2026-11-18 22:41:31.149790809 +1300
+@@ -48,7 +48,10 @@
+        "c06_rq2_profiles.png": "Bar charts: median district of each market on four features",
+        "c07_rq3_together.png": "Bar chart: share of districts building more homes than the year before, by year",
+        "c08_rq3_accuracy.png": "Bar chart: share of district-years where next year's direction was called correctly",
+-       "qr_app.png": "QR code linking to the interactive app at niwesh.shinyapps.io/nz-building-consents"}
++       "qr_app.png": "QR code linking to the interactive app at niwesh.shinyapps.io/nz-building-consents",
++       "c09_rq2_choose_k.png": "Bar charts: fit and repeatability of the grouping for two to eight groups",
++       "c06s_rq2_profiles_slide.png": "Bar charts: middle district of each market on four features",
++       "fig05_dendrogram.png": "Dendrogram: Ward's hierarchical clustering of 66 districts, cut into three"}
+ APP_URL = "niwesh.shinyapps.io/nz-building-consents"
+ 
+ # ---------------------------------------------------------------- element helpers
+@@ -127,8 +130,8 @@
+     text(1.62, 6.36, 7.6, 0.36, [para(run("Andrew Boulton   ·   Harish Sahadev M   ·   Niwesh Baraj", 15, True, "ink"), after=0)]),
+     text(8.33, 6.39, 4.5, 0.32, [para(run("STAT462 Data Mining   ·   Final presentation", 12, False, "ink"), align="right", after=0)])],
+     notes="Andrew: Kia ora, we're Group 8, while True: learn(). I'm Andrew, with Harish and Niwesh. In ten minutes we'll "
+-          "show what thirty-six years of building consents tell us about the cost of building, our kinds of building market, "
+-          "and whether we can see next year coming."))
++          "show what thirty-six years of building consents tell us about the cost of building, our kinds of building "
++          "market, and whether we can see next year coming."))
+ 
+ # 1. Why consents
+ slides.append(dict(presenter="andrew", topic="Background", els=
+@@ -140,12 +143,13 @@
+            [run("Cost per square metre varies a lot between districts, and nobody fully knows why", 17)]])]
+     + fig_card("c01_cost_by_district_2025.png", 5.5, 2.15, 7.35, 4.65),
+     notes="Andrew: Before anything is built, a council issues a building consent, and Stats NZ has recorded every one, by "
+-          "district, every month since 1990. So consents are an early signal. In 2025 a square metre of new house cost about "
+-          "4,600 dollars in Queenstown but about 2,700 in Selwyn. That gap is where our story starts."))
++          "district, every month since 1990. So consents are an early signal. Here are the five dearest and the five "
++          "cheapest districts to build in. In 2025 a square metre of new house cost about 4,600 dollars in Queenstown and "
++          "about 2,700 in Selwyn. That gap is where our story starts."))
+ 
+ # 2. Data preparation
+ steps = [("10.4 million rows", "13 Stats NZ tables: one row per district, building type and month"),
+-         ("One row per district", "Months added up into quarters and years, for 67 districts"),
++         ("One row per district", "Months added up into quarters and years for 67 districts; 66 for questions 2 and 3, without the Chatham Islands"),
+          ("Fair dollars", "Inflation and the 2010 GST change removed, so 1995 and 2025 compare")]
+ els = title("From 10 million rows to a fair comparison", "Most of the work was making the numbers comparable")
+ for i, (h, b) in enumerate(steps):
+@@ -154,10 +158,11 @@
+            [text(1.38, y + 0.17, 4.25, 1.15, [para(run(h, 18, True, "ink"), after=3), para(run(b, 14, False, "muted"))])]
+ els += fig_card("c02_inflation.png", 6.05, 2.15, 6.8, 4.65)
+ slides.append(dict(presenter="andrew", topic="Data", els=els,
+-    notes="Andrew: The raw data is over ten million rows in thirteen tables; we turned it into one row per district per "
+-          "quarter or year. The key step was removing inflation. The grey line, in the dollars of each year, rises almost "
+-          "five-fold; after removing building-cost inflation the real rise is only about twenty percent. Harish will now "
+-          "explain our questions."))
++    notes="Andrew: The raw data is over ten million rows in thirteen tables. We added the months up into one row per "
++          "district per quarter or year. Questions two and three leave out the Chatham Islands: only 34 new homes in ten "
++          "years. The key step was removing inflation. In the dollars of each year, a square metre of new house costs "
++          "almost five times what it did in 1991. After removing building-cost inflation, the rise is about twenty "
++          "percent. Harish will now explain our questions."))
+ 
+ # 3. Three questions
+ qs = [("What makes some districts dearer to build in?", "RQ1 · prediction models, from simple averages to tree ensembles"),
+@@ -231,7 +236,7 @@
+           "found."))
+ 
+ # 7. RQ2 markets
+-els = title("Three kinds of building market", "Grouping 66 districts by how they build, 2016–2026")
++els = title("Three kinds of building market", "66 districts grouped by nine measures of how they build, 2016–2026")
+ els += fig_card("c05_rq2_markets.png", 0.5, 2.15, 7.4, 4.65)
+ mk = [("House-building districts  (30)", "Commuter belts, lifestyle and retirement areas: Selwyn, Waipa, Tasman", "muted"),
+       ("Slow provincial districts  (21)", "Little and up-and-down building, cheapest: Gore, Wairoa, Grey", "dark"),
+@@ -241,25 +246,35 @@
+     els += [card(8.1, y, 4.75, 1.45), shape(8.32, y + 0.25, 0.3, 0.3, col, "ellipse"),
+             text(8.78, y + 0.15, 3.9, 1.2, [para(run(h, 16, True, "ink"), after=4), para(run(b, 13.5, False, "muted"))])]
+ slides.append(dict(presenter="andrew", topic="RQ2 · Building markets", els=els,
+-    notes="Andrew: Our second question: what kinds of building markets does New Zealand have? We described 66 districts by "
+-          "nine things, such as what homes they build, how fast and at what cost, and two clustering methods grouped similar "
+-          "districts. House-building districts like Selwyn build lots of big stand-alone houses; slow provincial districts "
+-          "like Gore build little and unevenly and are cheapest; urban markets, the cities and Queenstown, build townhouses "
+-          "and are dearest."))
++    notes="Andrew: Our second question: what kinds of building market does New Zealand have? We described each of 66 "
++          "districts by nine measures over the last ten years: the kinds of home it builds, how many for its population, "
++          "whether building is growing, how much it swings year to year, its cost, house size, and how much is "
++          "commercial. A grouping method called k-means put districts that build alike together. Each dot is a district. "
++          "Close dots build alike, and the dashed outlines show where most of each kind sit. House-building districts, "
++          "like Selwyn and Tasman, build many big stand-alone houses. Slow provincial districts, like Gore and Grey, "
++          "build little and unevenly, and are the cheapest. Urban markets, the cities and Queenstown, build the most "
++          "townhouses and are the dearest."))
+ 
+ # 8. RQ2 profiles
+ els = title("How the markets differ, and how sure we are")
+-els += fig_card("c06_rq2_profiles.png", 0.5, 1.75, 8.3, 5.05)
+-els += [card(9.0, 1.75, 3.85, 2.0)]
+-els += stat(9.25, 1.87, 3.5, "60 of 66", "districts placed the same by two different grouping methods")
+-els += text_card(9.0, 3.95, 3.85, 2.85, "But the edges are soft",
++els += fig_card("c06s_rq2_profiles_slide.png", 0.5, 1.75, 7.4, 5.05)
++els += [card(8.1, 1.75, 4.75, 1.6)]
++els += stat(8.35, 1.8, 4.3, "60 of 66", "districts placed the same by two different grouping methods")
++els += text_card(8.1, 3.5, 4.75, 1.65, "Why three groups?",
++                 "Two or three groups fit about equally well. Three held up best when we repeated the grouping on 100 "
++                 "re-drawn samples, and each group is one we can name.", size=14)
++els += text_card(8.1, 5.3, 4.75, 1.5, "But the edges are soft",
+                  "Districts form a smooth range rather than separate boxes; some places (Palmerston North, Tauranga) sit "
+                  "between two markets.", size=14)
+ slides.append(dict(presenter="andrew", topic="RQ2 · Building markets", els=els,
+-    notes="Andrew: Urban markets build mostly townhouses and cost about five percent more; house-building districts build the "
+-          "most homes per resident; provincial districts have the most commercial building and are about eight percent "
+-          "cheaper. Two different methods agreed on 60 of 66 districts, but the edges are soft. Niwesh will now look ahead "
+-          "to next year."))
++    notes="Andrew: This chart shows the middle district of each kind. In urban markets about four in ten new homes are "
++          "townhouses or apartments, against one in ten elsewhere, and building costs five percent more. House-building "
++          "districts build the most homes per resident. Slow provincial districts are about eight percent cheaper, and "
++          "commercial building makes up the biggest share of what they build. Why three groups? Two or three fit the data "
++          "about equally well, but three held up best when we repeated the grouping on a hundred re-drawn samples, and "
++          "each group is one we can name. How sure are we? A second method put 60 of the 66 districts in the same kind. "
++          "But the edges are soft. A grouping has no right answer to test against, and Palmerston North and Tauranga sit "
++          "between two kinds. Niwesh will now look ahead to next year."))
+ 
+ # 9. RQ3 together
+ els = title("Districts rise and fall together", "Share of districts building more homes than the year before")
+@@ -322,30 +337,58 @@
+ rows = [["", "RQ1 Cost per square metre", "RQ2 Markets", "RQ3 Next year"],
+         ["Unit", "District × quarter (5,694 train)", "District (66)", "District × year (1,914)"],
+         ["Methods", "Baselines, linear, polynomial, ridge, lasso, elastic net, GAM, regression tree, random forest, XGBoost, SVM",
+-         "k-means; hierarchical (single, complete, average, Ward)", "Logistic, lasso, LDA, QDA, classification tree, KNN, random forest"],
+-        ["Validation", "Forward-chaining CV; test 2020–26", "Silhouette, CH, gap, bootstrap stability", "Forward-chaining CV (AUC); test 2017–24"],
+-        ["Result", "Linear regression: MAPE 7.9%, R-squared 0.36", "k = 3; ARI 0.75 between methods", "Logistic: 58% accuracy, AUC 0.63"]]
++         "k-means on nine standardised measures (Euclidean distance); hierarchical clustering with single, complete, average and Ward linkage", "Logistic, lasso, LDA, QDA, classification tree, KNN, random forest"],
++        ["Validation", "Forward-chaining CV; test 2020–26", "Silhouette, Calinski–Harabasz, gap statistic, stability over 100 resamples; no test set", "Forward-chaining CV (AUC); test 2017–24"],
++        ["Result", "Linear regression: MAPE 7.9%, R-squared 0.36", "Three groups; k-means and Ward agree on 60 of 66 districts (adjusted Rand index 0.75)", "Logistic: 58% accuracy, AUC 0.63"]]
+ els = title("Appendix: methods and references")
+ cw = [1.6, 3.95, 3.35, 3.45]; y0 = 1.75
+-els.append(card(0.5, y0 - 0.1, 12.35, 3.75))
++els.append(card(0.5, y0 - 0.1, 12.35, 3.95))
+ for r, row in enumerate(rows):
+-    x = 0.6; rh = 0.45 if r == 0 else (0.95 if r == 2 else 0.6)
++    x = 0.6; rh = 0.45 if r == 0 else (0.95 if r == 2 else 0.68)
+     for c, cell in enumerate(row):
+         if r == 0:
+             els.append(shape(x, y0, cw[c] - 0.05, rh - 0.05, "orange", "rect"))
+         els.append(text(x + 0.1, y0 + 0.03, cw[c] - 0.25, rh - 0.1, [para(run(cell, 11.5, r == 0 or c == 0, "ink"), after=0)], valign="middle"))
+         x += cw[c]
+     y0 += rh
+-els.append(text(0.6, 5.55, 12.2, 1.4, [
++els.append(text(0.6, 5.72, 12.2, 1.4, [
+     para(run("References", 12, True, "ink"), after=3),
+     para(run("Stats NZ. (2026). Building consents issued: August 2026 [Data set]. CC BY 4.0. "
+              "https://www.stats.govt.nz/information-releases/building-consents-issued-august-2026", 10.5, False, "muted"), after=2),
++    para(run("Stats NZ. (2026). Business price indexes: June 2026 quarter [Data set]. CC BY 4.0. "
++             "https://www.stats.govt.nz/information-releases/business-price-indexes-june-2026-quarter/", 10.5, False, "muted"), after=2),
+     para(run("James, G., Witten, D., Hastie, T., & Tibshirani, R. (2021). An introduction to statistical learning (2nd ed.). Springer.", 10.5, False, "muted"), after=2),
+     para(run(f"Interactive app: https://{APP_URL}/", 10.5, True, "ink"), after=2),
+     para(run("AI use: Claude (Anthropic) helped write and debug R code and edit text; all analysis choices and results were reviewed by the group.",
+              10.5, False, "muted"), after=0)]))
+ slides.append(dict(presenter="niwesh", topic="Appendix", els=els, notes="Appendix for questions: methods, validation and results in technical terms."))
+ 
++# 13. Appendix: how the number of groups was chosen
++els = title("How we chose three groups", "k-means on 66 districts and nine measures. Every district is used, so there is no test set")
++els += fig_card("c09_rq2_choose_k.png", 0.5, 2.15, 7.6, 3.35)
++els += text_card(0.5, 5.65, 7.6, 1.15, "Why \"soft edges\"",
++                 "A fit near 0.2 is weak, and the gap statistic prefers one group. The three kinds summarise a range. "
++                 "They are not separate islands.", size=14)
++els += text_card(8.3, 2.15, 4.55, 2.05, "Fit",
++                 "How well districts fit their group (silhouette, from −1 to 1): 0.22 with two groups, 0.21 with three, "
++                 "lower from four up. No clear winner.", size=14)
++els += text_card(8.3, 4.35, 4.55, 2.45, "Repeatability",
++                 "Agreement between the grouping and 100 re-runs on re-drawn samples (adjusted Rand index; 1 is "
++                 "identical): 0.74 with two groups, 0.84 with three, 0.80 with four, 0.69 with five.", size=14)
++slides.append(dict(presenter="andrew", topic="Appendix", els=els,
++    notes="Appendix for questions: how three groups were chosen. Numbers from outputs/tables/rq2/t02_choose_k.csv."))
++
++# 14. Appendix: the second method
++els = title("A second method: Ward's tree", "Hierarchical clustering of the same 66 districts. The height of a join is how far apart the two branches are")
++els += fig_card(str(ROOT / "outputs" / "figures" / "rq2" / "fig05_dendrogram.png"), 0.5, 2.15, 8.3, 4.65)
++els += text_card(9.0, 2.15, 3.85, 2.75, "What it shows",
++                 "Ward's linkage, cut into three, gives groups of 34, 20 and 12 and agrees with k-means on 60 of 66 "
++                 "districts. Single and average linkage chain: 64/1/1 and 62/2/2.", size=14)
++els += text_card(9.0, 5.05, 3.85, 1.75, "How to read it",
++                 "Closeness is the height where two branches join, not how near they sit left to right.", size=14)
++slides.append(dict(presenter="andrew", topic="Appendix", els=els,
++    notes="Appendix for questions: the second method. Sizes from outputs/tables/rq2/t03_linkages.csv."))
++
+ # ---------------------------------------------------------------- header (as in the pitch) and page number
+ for i, s in enumerate(slides):
+     if i == 0:

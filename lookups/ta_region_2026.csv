@@ -1,0 +1,68 @@
+area,region,island,region_rule
+Ashburton District,Canterbury,South Island,whole
+Auckland,Auckland,North Island,whole
+Buller District,West Coast,South Island,whole
+Carterton District,Wellington,North Island,whole
+Central Hawke's Bay District,Hawke's Bay,North Island,whole
+Central Otago District,Otago,South Island,whole
+Chatham Islands Territory,Chatham Islands,Chatham Islands,whole
+Christchurch City,Canterbury,South Island,whole
+Clutha District,Otago,South Island,whole
+Dunedin City,Otago,South Island,whole
+Far North District,Northland,North Island,whole
+Gisborne District,Gisborne,North Island,whole
+Gore District,Southland,South Island,whole
+Grey District,West Coast,South Island,whole
+Hamilton City,Waikato,North Island,whole
+Hastings District,Hawke's Bay,North Island,whole
+Hauraki District,Waikato,North Island,whole
+Horowhenua District,Manawatu-Whanganui,North Island,whole
+Hurunui District,Canterbury,South Island,whole
+Invercargill City,Southland,South Island,whole
+Kaikoura District,Canterbury,South Island,whole
+Kaipara District,Northland,North Island,whole
+Kapiti Coast District,Wellington,North Island,whole
+Kawerau District,Bay of Plenty,North Island,whole
+Lower Hutt City,Wellington,North Island,whole
+Mackenzie District,Canterbury,South Island,whole
+Manawatu District,Manawatu-Whanganui,North Island,whole
+Marlborough District,Marlborough,South Island,whole
+Masterton District,Wellington,North Island,whole
+Matamata-Piako District,Waikato,North Island,whole
+Napier City,Hawke's Bay,North Island,whole
+Nelson City,Nelson,South Island,whole
+New Plymouth District,Taranaki,North Island,whole
+Opotiki District,Bay of Plenty,North Island,whole
+Otorohanga District,Waikato,North Island,whole
+Palmerston North City,Manawatu-Whanganui,North Island,whole
+Porirua City,Wellington,North Island,whole
+Queenstown-Lakes District,Otago,South Island,whole
+Rangitikei District,Manawatu-Whanganui,North Island,"dominant: Manawatu-Whanganui 99.9%, Hawke's Bay 0.1%"
+Rotorua District,Bay of Plenty,North Island,"dominant: Bay of Plenty 95.1%, Waikato 4.9%"
+Ruapehu District,Manawatu-Whanganui,North Island,whole
+Selwyn District,Canterbury,South Island,whole
+South Taranaki District,Taranaki,North Island,whole
+South Waikato District,Waikato,North Island,whole
+South Wairarapa District,Wellington,North Island,whole
+Southland District,Southland,South Island,whole
+Stratford District,Taranaki,North Island,"dominant: Taranaki 99.3%, Manawatu-Whanganui 0.7%"
+Tararua District,Manawatu-Whanganui,North Island,"dominant: Manawatu-Whanganui 100.0%, Wellington 0.0%"
+Tasman District,Tasman,South Island,whole
+Taupo District,Waikato,North Island,"dominant: Waikato 99.8%, Bay of Plenty 0.2%, Hawke's Bay 0.1%, Manawatu-Whanganui 0.0%"
+Tauranga City,Bay of Plenty,North Island,whole
+Thames-Coromandel District,Waikato,North Island,whole
+Timaru District,Canterbury,South Island,whole
+Upper Hutt City,Wellington,North Island,whole
+Waikato District,Waikato,North Island,whole
+Waimakariri District,Canterbury,South Island,whole
+Waimate District,Canterbury,South Island,whole
+Waipa District,Waikato,North Island,whole
+Wairoa District,Hawke's Bay,North Island,whole
+Waitaki District,Otago,South Island,"dominant: Otago 83.3%, Canterbury 16.7%"
+Waitomo District,Waikato,North Island,"dominant: Waikato 99.7%, Manawatu-Whanganui 0.3%"
+Wellington City,Wellington,North Island,whole
+Western Bay of Plenty District,Bay of Plenty,North Island,whole
+Westland District,West Coast,South Island,whole
+Whakatane District,Bay of Plenty,North Island,whole
+Whanganui District,Manawatu-Whanganui,North Island,whole
+Whangarei District,Northland,North Island,whole

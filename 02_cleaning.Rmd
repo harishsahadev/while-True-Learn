@@ -1,0 +1,529 @@
+---
+title: "Building consents issued — cleaning and feature engineering for RQ1"
+subtitle: "Stats NZ, August 2026 release: from 4.3 million monthly rows to one district-quarter table"
+author: "while True: learn() — Group 8 · STAT462 Assessment 1"
+output:
+  html_document:
+    toc: yes
+    number_sections: yes
+    toc_float: yes
+---
+
+```{=html}
+<style>
+.boxNote {
+background-color: lightblue;
+color: black;
+border: 2px solid black;
+margin: 5px;
+padding: 5px;
+font-style: italic;
+}
+</style>
+```
+
+```{r setup, include = FALSE}
+Sys.setenv(LANG = "en")
+knitr::opts_chunk$set(message = FALSE,
+                      warning = FALSE,
+                      fig.align = 'center',
+                      out.width = '75%')
+library(tidyverse)
+library(knitr)
+set.seed(462)   # project seed; nothing in this document is random, but every document sets it
+
+# the only line to change on another machine: the folder holding the CSVs
+# extracted from the Stats NZ zips. Set STAT462_DATA in your .Renviron, or
+# edit the fallback. The folder must sit outside OneDrive
+data_root <- Sys.getenv("STAT462_DATA", unset = "C:/Users/AndrewBoulton/stat462-data/raw")
+
+# readers and small utilities shared by every document in this folder
+source("helpers.R")
+
+# where the finished table goes: inside the project folder, outside the submission zip
+out_dir <- "../data-local-only/processed"
+
+# the train / test cut, as pitched: train to the end of 2019, test 2020 onwards
+train_end_year <- 2019L
+```
+
+This document builds the dataset for research question 1 — *what drives the real cost per square metre of new houses across New Zealand's districts?* — from the Stats NZ *Building consents issued: August 2026* release (published 1 October 2026, CC BY 4.0). It takes the territorial authority table apart, keeps the ten monthly series the question needs, rolls them up to district-quarters, builds the response two ways, derives the features, attaches the price index and the per-1,000-residents series, and writes one tidy table of 9,715 rows that the modelling document reads. It fits no models beyond a fixed-effects baseline used as a check. Every choice it makes was settled in the exploratory analysis (`01_EDA.Rmd`) or recorded in the working brief on 6 November 2026; the box below lists them so a reader does not have to go looking.
+
+::: boxNote
+Decisions carried out here. **Unit:** district × quarter, 67 territorial authorities, complete quarters only (1990-Q2 to 2026-Q2). **Auckland** is one district, not its 21 local boards. **Response:** two columns — the log of real $/m² (deflated quarter by quarter with the CGPI for residential buildings) and the log of the district's $/m² relative to the rest of the country in the same quarter; the modelling document chooses between them. **No minimum house count is applied here.** `houses` is kept as a column so the modelling document can filter (the agreed cut is 5) and use it as a weight. **Region** comes from a hand-built lookup in which the seven districts that straddle regional boundaries go to the region holding most of their new dwellings. **Features are count-based** wherever a value-based version would share a component with the response. **Rolling features look backwards only**, and nothing is standardised or averaged over the whole period, so the test years never leak into the training years. **GST** is left in the nominal values (the rate rose from 12.5% to 15% in October 2010, which the real series inherits as a step of about 2.2%).
+:::
+
+# Set up
+
+The territorial authority file and the per-1,000-residents file come from the release zip, extracted into `data_root`. The price index is a separate Stats NZ download (*Business price indexes: June 2026 quarter*), and the region lookup is a 67-row CSV kept with the code. The chunk stops early, naming the file, if any of the release files is missing; the price index is optional, in that the document still runs without it and says so, but the real-dollar columns are then empty.
+
+```{r}
+stopifnot("data_root does not exist: set STAT462_DATA or edit the fallback in the setup chunk" = dir.exists(data_root))
+
+f_ta         <- "Building consents by territorial authority (Monthly).csv"
+f_per1000_ta <- "New dwellings consented per 1000 residents by territorial authority (Annual).csv"
+f_lookup     <- "lookups/ta_region_2026.csv"
+
+missing_files <- c(f_ta, f_per1000_ta)[!file.exists(file.path(data_root, c(f_ta, f_per1000_ta)))]
+if (length(missing_files) > 0) {
+  stop("Missing from data_root: ", paste(missing_files, collapse = "; "))
+}
+stopifnot("lookups/ta_region_2026.csv is missing next to this document" = file.exists(f_lookup))
+
+# the price index: one file in data_root whose name contains "price", in Infoshare layout
+cgpi_files <- list.files(data_root, pattern = "price", ignore.case = TRUE, full.names = TRUE)
+cgpi_ok <- length(cgpi_files) == 1 &&
+  all(c("Series_reference", "Period", "Data_value") %in%
+        names(read_csv(cgpi_files[1], n_max = 0, col_types = cols(.default = col_character()), progress = FALSE)))
+cat("Price index file found:", cgpi_ok, "\n")
+if (length(cgpi_files) > 0) print(basename(cgpi_files))
+```
+
+# The district-quarter spine
+
+The territorial authority table holds 4,348,384 rows: 69 areas × 26 building types × three kinds of work × three measures, by month. RQ1 needs ten of those series per area. Three carry the response — the number, consented value and floor area of new houses — and seven carry the counts the features are built from: new dwelling units and the three multi-unit types inside them, new non-residential buildings, all new buildings, and residential alterations. Everything is new work except the alterations series, and everything is a count except the two components of the response.
+
+Two rules from the EDA apply from the first line. `Period` is read as text, because `2025.10` read as a number is October lost in January. And the building types are nested, so this table is never summed across types: each series is taken at its own level and the hierarchy is left alone.
+
+```{r}
+series_map <- tribble(
+  ~building_type,                                   ~work,     ~measure,     ~col,
+  "Houses",                                         "New",     "Number",     "houses",
+  "Houses",                                         "New",     "Value",      "value_nominal",
+  "Houses",                                         "New",     "Floor area", "floor_area",
+  "Dwelling units",                                 "New",     "Number",     "dwelling_units",
+  "Apartments",                                     "New",     "Number",     "apartments",
+  "Retirement village units",                       "New",     "Number",     "retirement",
+  "Townhouses, flats, units, and other dwellings",  "New",     "Number",     "townhouses",
+  "Non-residential buildings",                      "New",     "Number",     "nonres_n",
+  "All buildings",                                  "New",     "Number",     "allbld_n",
+  "Residential buildings",                          "Altered", "Number",     "alter_n"
+)
+```
+
+The file is 757 MB and takes a minute or two to read, so the chunk that reads it is cached; it keeps only the ten series, which brings 4.3 million rows down to about 300 thousand before anything else happens. Editing `series_map` does not invalidate the cache — delete `02_cleaning_cache/` after changing it.
+
+```{r load-ta, cache = TRUE}
+df_ta <- read_infoshare(f_ta) %>%
+  dplyr::select(Period, Data_value,
+                area          = Series_title_1,
+                building_type = Series_title_2,
+                work          = Series_title_3,
+                measure       = Series_title_4) %>%
+  # keep the ten series the question needs, under their working names
+  inner_join(series_map, by = c("building_type", "work", "measure")) %>%
+  dplyr::select(area, Period, col, Data_value)
+
+cat("Rows kept from the TA file:", nrow(df_ta), " series:", n_distinct(df_ta$col), " areas:", n_distinct(df_ta$area), "\n")
+```
+
+Monthly district figures are too noisy to model — a small district can consent three houses one month and none the next — so the unit is the district-quarter. Months are summed into quarters, and only complete quarters are kept, which removes 2026-Q3 (July and August only). The national row is set aside for the relative response; the area outside any territorial authority is dropped.
+
+```{r}
+ta_quarter_all <- df_ta %>%
+  mutate(year    = period_year(Period),
+         quarter = period_quarter(Period)) %>%
+  group_by(area, year, quarter, col) %>%
+  summarise(total = sum(Data_value), months = n_distinct(Period), .groups = "drop") %>%
+  # keep complete quarters only, which drops the partial 2026-Q3
+  filter(months == 3) %>%
+  pivot_wider(id_cols = c(area, year, quarter), names_from = col, values_from = total)
+
+# the national totals, kept for the relative response
+nz_quarter <- ta_quarter_all %>%
+  filter(area == "New Zealand") %>%
+  dplyr::select(year, quarter, nz_value = value_nominal, nz_floor = floor_area)
+
+# the 67 districts
+spine <- ta_quarter_all %>%
+  filter(!area %in% c("New Zealand", "Area Outside Territorial Authority")) %>%
+  arrange(area, year, quarter) %>%
+  mutate(yq = paste0(year, "Q", quarter))
+
+cat("District-quarters:", nrow(spine), " districts:", n_distinct(spine$area),
+    " quarters:", n_distinct(spine$yq), " from", min(spine$yq), "to", max(spine$yq), "\n")
+stopifnot(nrow(spine) == n_distinct(spine$area) * n_distinct(spine$yq))
+```
+
+The spine has 9,715 rows: 67 districts × 145 quarters from 1990-Q2 to 2026-Q2, with no gaps, so every district has the same 145 rows and every lag or rolling window below steps through calendar quarters exactly.
+
+# Region and island
+
+The release names districts but not regions, and seven districts straddle a regional boundary (Rotorua, Taupō, Waitomo, Stratford, Rangitīkei, Tararua and Waitaki). `lookups/ta_region_2026.csv` assigns each of the 67 districts to one region: 60 lie wholly inside one, and the seven straddlers go to the region that holds most of their new dwellings since 1990, worked out from the SA2 file and Stats NZ's 2026 meshblock higher geographies. The share of dwellings behind each assignment is in the `region_rule` column, so the rule can be revisited without rebuilding anything. The Chatham Islands sit outside every region and keep their own level.
+
+```{r}
+ta_region <- read_csv(f_lookup, col_types = cols(.default = col_character()), progress = FALSE)
+
+# every district has exactly one row in the lookup, and the lookup has no extras
+stopifnot(setequal(ta_region$area, unique(spine$area)), !anyDuplicated(ta_region$area))
+
+ta_region %>%
+  filter(region_rule != "whole") %>%
+  kable(caption = "The seven districts that straddle a regional boundary, and the share of their new dwellings (1990–2026) in each region")
+```
+
+Six of the seven are not close calls: Taupō is 99.8% Waikato, Rangitīkei 99.9% Manawatū-Whanganui. Waitaki is the one with a real split, 83% Otago and 17% Canterbury, and it goes to Otago.
+
+```{r}
+spine <- spine %>%
+  left_join(dplyr::select(ta_region, area, region, island), by = "area")
+
+ta_region %>%
+  count(island, region, name = "districts") %>%
+  arrange(island, desc(districts)) %>%
+  kable(caption = "Districts per region")
+```
+
+Region has 17 levels, six of them single-district (Auckland, Gisborne, Nelson, Tasman, Marlborough and the Chatham Islands). That is under the 32-level limit of `tree()` and the 53-level limit of `randomForest()`, which district itself — 67 levels — is not. This is why region, not district, goes into the tree models.
+
+# The response
+
+## Nominal cost per square metre
+
+The quantity RQ1 is about is consented value divided by consented floor area, for new houses in a district-quarter:
+
+$$\text{ppm2}_{d,t} = \frac{V_{d,t}}{A_{d,t}}$$
+
+where $V$ is the GST-inclusive consented value in dollars and $A$ the floor area in square metres. It is undefined when a district consents no houses in a quarter, or reports no floor area; those rows keep their place in the table with a missing response rather than being dropped, so the modelling document decides what to do with them. The average size of a new house is the other ratio of the same three series.
+
+```{r}
+rq1 <- spine %>%
+  mutate(nominal_ppm2 = if_else(houses > 0 & floor_area > 0, value_nominal / floor_area, NA_real_),
+         m2_per_house = if_else(houses > 0, floor_area / houses, NA_real_))
+
+cat("Rows with no nominal $/m² (no houses, or no floor area):", sum(is.na(rq1$nominal_ppm2)),
+    "of", nrow(rq1), "\n")
+```
+
+215 rows — 2.2% of the table — have no house and therefore no cost per square metre.
+
+## Real dollars
+
+The nominal series mixes 36 years of inflation: the national $/m² rose 4.7× between 1991 and 2025, and after deflation only 14%. The deflator is Stats NZ's Capital Goods Price Index for residential buildings (`CEPQ.S61101`, quarterly), applied quarter by quarter rather than as an annual average, because the frame is quarterly and the 2021–22 cost run-up moved several percent within a year. Values are expressed in the dollars of the index's latest quarter:
+
+$$V^{\text{real}}_{d,t} = V_{d,t} \times \frac{\text{CGPI}_{\text{base}}}{\text{CGPI}_t}, \qquad \text{ppm2}^{\text{real}}_{d,t} = \frac{V^{\text{real}}_{d,t}}{A_{d,t}}$$
+
+The response is the log of the real figure, which pulls in the right tail that small districts produce in quarters with five or six houses. The index file is a separate download; if it is not in `data_root` the columns are carried as missing and the document says so.
+
+```{r, eval = cgpi_ok}
+cgpi <- read_csv(cgpi_files[1], col_types = cols(.default = col_character()), progress = FALSE) %>%
+  filter(Series_reference == "CEPQ.S61101") %>%
+  transmute(Period,
+            year    = period_year(Period),
+            quarter = period_quarter(Period),
+            cgpi    = as.numeric(Data_value))
+
+# the latest quarter in the file is the base: values are in its dollars
+base_cgpi <- cgpi %>% filter(Period == max(Period)) %>% pull(cgpi)
+cat("Price index:", nrow(cgpi), "quarters from", min(cgpi$Period), "to", max(cgpi$Period),
+    "; base quarter", max(cgpi$Period), "\n")
+
+rq1 <- rq1 %>%
+  left_join(dplyr::select(cgpi, year, quarter, cgpi), by = c("year", "quarter")) %>%
+  mutate(value_real    = value_nominal * base_cgpi / cgpi,
+         real_ppm2     = if_else(!is.na(nominal_ppm2), value_real / floor_area, NA_real_),
+         log_real_ppm2 = log(real_ppm2))
+
+# every district-quarter must have an index value
+stopifnot(!anyNA(rq1$cgpi))
+```
+
+```{r, eval = !cgpi_ok}
+# no price index on this machine: carry the real-dollar columns as NA so the table keeps its shape
+rq1 <- rq1 %>%
+  mutate(cgpi = NA_real_, value_real = NA_real_, real_ppm2 = NA_real_, log_real_ppm2 = NA_real_)
+cat("Price index file not found in data_root: cgpi, value_real, real_ppm2 and log_real_ppm2 are NA in this run.\n")
+```
+
+```{r, eval = cgpi_ok}
+rq1 %>%
+  filter(houses >= 5, !is.na(real_ppm2)) %>%
+  summarise(rows = n(),
+            p01 = quantile(real_ppm2, 0.01),
+            median = median(real_ppm2),
+            p99 = quantile(real_ppm2, 0.99)) %>%
+  kable(digits = 0, format.args = list(big.mark = ","),
+        caption = paste0("Real $/m² of new houses, district-quarters with 5+ houses, in ", max(cgpi$Period), " dollars"))
+```
+
+## Relative to the rest of the country
+
+The second response answers the question as it is worded — *across districts* — directly. It is the log of the district's $/m² divided by the $/m² of every other district in the same quarter:
+
+$$\text{rel}_{d,t} = \log \text{ppm2}_{d,t} - \log \frac{V_{\text{NZ},t} - V_{d,t}}{A_{\text{NZ},t} - A_{d,t}}$$
+
+A value of 0 means the district cost the same per square metre as the rest of the country that quarter; +0.3 means about 35% dearer, −0.2 about 18% cheaper. The district is taken out of the national total before dividing, so a district is never compared with itself — which matters for Auckland, the largest share of the total. Two things follow from the construction. The deflator cancels, because numerator and denominator are in the same quarter's dollars, so this response needs no price index. And everything common to all districts in a quarter — materials, labour, the building code, the 2021–22 cost shock — is removed, leaving only the spread between places and how it moves. The two responses answer slightly different questions: the real one, *what does a square metre cost here, in constant dollars*; the relative one, *why does it cost more here than elsewhere*.
+
+```{r}
+rq1 <- rq1 %>%
+  left_join(nz_quarter, by = c("year", "quarter")) %>%
+  mutate(nz_excl_ppm2_nominal = (nz_value - value_nominal) / (nz_floor - floor_area),
+         log_rel_ppm2         = log(nominal_ppm2) - log(nz_excl_ppm2_nominal)) %>%
+  dplyr::select(-nz_value, -nz_floor)
+
+rel_5 <- rq1 %>% filter(houses >= 5, !is.na(log_rel_ppm2))
+
+tibble(quantile = c("1%", "10%", "50%", "90%", "99%"),
+       log_rel_ppm2 = quantile(rel_5$log_rel_ppm2, c(0.01, 0.1, 0.5, 0.9, 0.99)),
+       ratio_to_rest_of_nz = exp(log_rel_ppm2)) %>%
+  kable(digits = 3, caption = "The relative response, district-quarters with 5+ houses")
+```
+
+The median district-quarter sits at 0.96 of the rest-of-country figure — a little below, because the national total is pulled up by the large expensive cities — and 98% of rows lie between 0.73 and 1.31. The standard deviation is 0.11, so a typical district is about 11% away from the rest of the country in a typical quarter.
+
+```{r}
+rel_5 %>%
+  ggplot(aes(x = log_rel_ppm2)) +
+  geom_histogram(bins = 60, fill = "#C76B0A", colour = "white") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(title = "Most district-quarters sit within ±20% of the rest of the country",
+       x = "log($/m² in the district ÷ $/m² in the rest of NZ), new houses, same quarter", y = "District-quarters")
+```
+
+```{r}
+rel_2025 <- rel_5 %>%
+  filter(year == 2025) %>%
+  group_by(area) %>%
+  summarise(quarters = n(), mean_log_rel = mean(log_rel_ppm2), ratio = exp(mean_log_rel), .groups = "drop") %>%
+  arrange(desc(ratio))
+
+bind_rows(slice_head(rel_2025, n = 5), slice_tail(rel_2025, n = 5)) %>%
+  kable(digits = 2, caption = "Dearest and cheapest districts relative to the rest of the country, 2025 (quarters with 5+ houses)")
+```
+
+Queenstown-Lakes consented at 1.43× the rest of the country in 2025, Thames-Coromandel at 1.31 and Wellington City at 1.28; Selwyn at 0.79, Stratford at 0.80 and Waimakariri at 0.82. Four of the five dearest and three of the five cheapest are the names the EDA's nominal 2025 ranking produced; the newcomers — Wairoa, Stratford, Waimate — are small districts that the EDA's 50-houses-a-year cut left out and the five-houses-a-quarter cut lets in. The relative scale makes the gap readable without a dollar figure: on this measure Queenstown is about 1.8× Selwyn (the EDA's annual nominal figures gave 1.7×; the difference is averaging four quarterly ratios rather than one annual one).
+
+# Features
+
+Every feature below is built from the same district-quarter as the response, and all of them come from the release itself. The leakage rule is simple: nothing on the right-hand side may contain the consented value of new houses, which is the response's numerator. So the mix and activity features are ratios of **counts**, not of values, and the only value series used anywhere is the one in the response.
+
+## What is being built
+
+Five count-based ratios describe the kind of building going on. The multi-unit share is the share of new dwelling units that are not stand-alone houses; its three parts (apartments, retirement village units, and townhouses, flats and units) are kept separately for the modelling document to choose one level of — they sum to the multi-unit share, so all four together are collinear. Non-residential activity is the share of all new buildings that are non-residential, and the alterations ratio is residential alteration consents per new dwelling unit, a renovate-versus-build measure. The log of new dwelling units is the scale of the market.
+
+```{r}
+rq1 <- rq1 %>%
+  mutate(multi_share    = if_else(dwelling_units > 0, 1 - houses / dwelling_units, NA_real_),
+         apart_share    = if_else(dwelling_units > 0, apartments / dwelling_units, NA_real_),
+         retire_share   = if_else(dwelling_units > 0, retirement / dwelling_units, NA_real_),
+         town_share     = if_else(dwelling_units > 0, townhouses / dwelling_units, NA_real_),
+         nonres_share_n = if_else(allbld_n > 0, nonres_n / allbld_n, NA_real_),
+         alter_per_new  = if_else(dwelling_units > 0, alter_n / dwelling_units, NA_real_),
+         log_dwellings  = log1p(dwelling_units))
+
+rq1 %>%
+  filter(houses >= 5) %>%
+  dplyr::select(m2_per_house, multi_share, nonres_share_n, alter_per_new, log_dwellings) %>%
+  pivot_longer(everything(), names_to = "feature", values_to = "value") %>%
+  group_by(feature) %>%
+  summarise(missing = sum(is.na(value)),
+            p10 = quantile(value, 0.1, na.rm = TRUE),
+            median = median(value, na.rm = TRUE),
+            p90 = quantile(value, 0.9, na.rm = TRUE), .groups = "drop") %>%
+  kable(digits = 2, caption = "Size, mix and activity features, district-quarters with 5+ houses")
+```
+
+A typical new house is 190 m²; a typical district-quarter is 10% multi-unit (the mean is higher, 16%, because a few city quarters are over 50%); non-residential buildings are about 30% of new buildings by count; and districts consent roughly 1.75 residential alterations for every new dwelling.
+
+## Momentum and volatility
+
+Two features describe where the district's market has been. Year-on-year growth is the log change in house consents from the same quarter a year earlier, and volatility is the standard deviation of log house consents over the trailing eight quarters. Both are computed within each district, in time order, and both look backwards only — the window ends at the current quarter and never reaches forward — so a training row never sees a test quarter. `log1p` keeps the quarters with zero houses.
+
+```{r}
+rq1 <- rq1 %>%
+  arrange(area, year, quarter) %>%
+  group_by(area) %>%
+  mutate(houses_yoy  = log1p(houses) - lag(log1p(houses), 4),
+         houses_vol8 = rolling_sd(log1p(houses), 8)) %>%
+  ungroup()
+
+cat("Missing: houses_yoy", sum(is.na(rq1$houses_yoy)), "(the first 4 quarters of each district);",
+    "houses_vol8", sum(is.na(rq1$houses_vol8)), "(the first 7)\n")
+```
+
+## Market heat: new dwellings per 1,000 residents
+
+The per-1,000-residents file is the only place the release brings population in, and it is the market-heat feature. The EDA found that each district has twelve annual series in it, one per year-end month, so together they give a rolling twelve-month rate at every month. The feature takes the rate for the year ending the last month of the **previous** quarter — for 2025-Q2, the year to March 2025 — which is strictly in the past and only three months stale. The district series start with the year ending January 1996, so the first quarter with a value is 1996-Q2 and the 24 quarters before it are missing in every district; the brief's decision is to keep those rows with the feature missing rather than start the frame in 1996.
+
+```{r}
+per1000_ta <- read_infoshare(f_per1000_ta) %>%
+  dplyr::select(area = Series_title_1, Period, per1000_lag = Data_value)
+
+rq1 <- rq1 %>%
+  mutate(prev_period = previous_quarter_end(year, quarter)) %>%
+  left_join(per1000_ta, by = c("area", "prev_period" = "Period")) %>%
+  dplyr::select(-prev_period)
+
+rq1 %>%
+  summarise(missing = sum(is.na(per1000_lag)),
+            first_quarter_with_value = min(yq[!is.na(per1000_lag)]),
+            median = median(per1000_lag, na.rm = TRUE),
+            p90 = quantile(per1000_lag, 0.9, na.rm = TRUE)) %>%
+  kable(digits = 1, caption = "New dwellings per 1,000 residents, year ending the previous quarter")
+```
+
+1,608 rows are missing — 67 districts × 24 quarters, exactly as expected — and the first value is in 1996-Q2.
+
+## Persistence: lagged responses
+
+The last four columns are the two responses lagged one and four quarters within each district. They are **not** for the headline model: a lagged response explains the level by "what it was last quarter" and would dominate any model it is in, turning *what drives cost* into *what cost was*. They are in the table for one purpose, a persistence benchmark that shows how much of the response is simply carried forward, against which the structural models are read.
+
+```{r}
+rq1 <- rq1 %>%
+  arrange(area, year, quarter) %>%
+  group_by(area) %>%
+  mutate(log_real_ppm2_lag1 = lag(log_real_ppm2, 1),
+         log_real_ppm2_lag4 = lag(log_real_ppm2, 4),
+         log_rel_ppm2_lag1  = lag(log_rel_ppm2, 1),
+         log_rel_ppm2_lag4  = lag(log_rel_ppm2, 4)) %>%
+  ungroup()
+```
+
+# Train and test
+
+The split is by time, not at random: training rows run to the end of `r train_end_year`, test rows from 2020-Q1 to 2026-Q2. Districts move together within a quarter — the national cycle — so a random split would put a 2021-Q3 row in the training set and its neighbours in the test set and leak the cycle. The flag is stored in the table; the modelling document applies it, and tunes within the training rows using folds that are blocks of whole years for the same reason.
+
+```{r}
+rq1 <- rq1 %>%
+  mutate(is_train = year <= train_end_year)
+
+rq1 %>%
+  group_by(is_train) %>%
+  summarise(all_rows = n(),
+            rows_with_5plus_houses = sum(houses >= 5),
+            first = min(yq), last = max(yq), .groups = "drop") %>%
+  kable(caption = "The time-ordered split, before and after the agreed minimum of five houses")
+```
+
+7,973 training and 1,742 test rows, as pitched; 7,051 and 1,611 once the modelling document applies the five-house minimum. The test period holds the 2021–22 construction-cost shock, so test error should be expected to run above cross-validated error, and the write-up should say so rather than discover it.
+
+# Checks
+
+## Shape and missing values
+
+The columns are put in their final order, the hard facts about the table are asserted — the row count is fixed by the pinned release, so a different count means a different release — and the missing values are listed by column so none of them is a surprise.
+
+```{r}
+rq1 <- rq1 %>%
+  dplyr::select(area, region, island, year, quarter, yq, is_train,
+                houses, floor_area, value_nominal, nominal_ppm2, m2_per_house,
+                cgpi, value_real, real_ppm2, log_real_ppm2,
+                nz_excl_ppm2_nominal, log_rel_ppm2,
+                dwelling_units, multi_share, apart_share, retire_share, town_share,
+                nonres_share_n, alter_per_new, log_dwellings, houses_yoy, houses_vol8, per1000_lag,
+                log_real_ppm2_lag1, log_real_ppm2_lag4, log_rel_ppm2_lag1, log_rel_ppm2_lag4)
+
+stopifnot(nrow(rq1) == 9715,
+          n_distinct(rq1$area) == 67,
+          !anyDuplicated(rq1[, c("area", "year", "quarter")]),
+          !anyNA(rq1$houses), !anyNA(rq1$floor_area), !anyNA(rq1$value_nominal),
+          !anyNA(rq1$region), !anyNA(rq1$nz_excl_ppm2_nominal),
+          all(rq1$houses >= 0), all(rq1$floor_area >= 0), all(rq1$value_nominal >= 0))
+
+rq1 %>%
+  summarise(across(everything(), ~ sum(is.na(.x)))) %>%
+  pivot_longer(everything(), names_to = "column", values_to = "missing") %>%
+  filter(missing > 0) %>%
+  kable(caption = "Columns with missing values, and how many")
+```
+
+Every missing value has a reason: 215 rows with no house (the responses and `m2_per_house`), 190 with no dwelling unit at all (the mix features), 74 with no new building of any kind, the first four and seven quarters of each district (momentum and volatility), the 24 quarters before the per-1,000 series starts, and the lags. The real-dollar columns are missing throughout only if the price index file was not found.
+
+## Against the Python cross-build
+
+The same table was built independently in Python from the zips (`Claude outputs/cleaning_checks/build_rq1_pycheck.py`), without the price index. If its output is in `out_dir`, every shared numeric column is compared row by row: the missing-value pattern must match and the largest difference must be rounding.
+
+```{r}
+pycheck_file <- file.path(out_dir, "rq1_district_quarter_pycheck.csv")
+pycheck_ok <- file.exists(pycheck_file)
+cat("Python cross-build found:", pycheck_ok, "\n")
+```
+
+```{r, eval = pycheck_ok}
+pycheck <- read_csv(pycheck_file,
+                    col_types = cols(area = col_character(), region = col_character(), island = col_character(),
+                                     yq = col_character(), is_train = col_logical(), .default = col_double()),
+                    progress = FALSE) %>%
+  mutate(year = as.integer(year), quarter = as.integer(quarter))
+
+# the real-dollar columns are empty in the Python build, so they are not compared
+real_cols <- c("cgpi", "value_real", "real_ppm2", "log_real_ppm2", "log_real_ppm2_lag1", "log_real_ppm2_lag4")
+num_cols  <- rq1 %>% dplyr::select(where(is.numeric), -year, -quarter) %>% names() %>% setdiff(real_cols)
+
+both <- inner_join(rq1, pycheck, by = c("area", "year", "quarter"), suffix = c("_r", "_py"))
+
+comparison <- map_dfr(num_cols, function(col) {
+  r <- both[[paste0(col, "_r")]]
+  p <- both[[paste0(col, "_py")]]
+  tibble(column          = col,
+         rows_compared   = sum(!is.na(r) & !is.na(p)),
+         na_pattern_same = all(is.na(r) == is.na(p)),
+         max_abs_diff    = if (any(!is.na(r) & !is.na(p))) max(abs(r - p), na.rm = TRUE) else NA_real_)
+})
+
+kable(comparison, digits = 10, caption = "R build vs Python build, shared numeric columns")
+
+stopifnot(nrow(both) == nrow(rq1),
+          all(both$region_r == both$region_py), all(both$island_r == both$island_py),
+          all(both$is_train_r == both$is_train_py),
+          all(comparison$na_pattern_same),
+          all(comparison$max_abs_diff < 1e-6, na.rm = TRUE))
+```
+
+## How much is place, how much is time
+
+A fixed-effects baseline shows what district identity and calendar year explain on their own — the ceiling any model that only knows *which* district and *when* can reach — on the rows the modelling document will use. The pitch work found year and district together explain 63% of the variance in log real $/m², year alone 43%; the relative response should show the opposite pattern, since the national cycle has been divided out.
+
+```{r}
+rq1_5 <- rq1 %>% filter(houses >= 5, !is.na(log_rel_ppm2))
+
+# R² of a linear model with only the named fixed effects
+r2_of <- function(formula, data) summary(lm(formula, data = data))$r.squared
+
+baseline <- tibble(
+  effects      = c("district", "year", "district + year", "district + year + quarter"),
+  r2_relative  = c(r2_of(log_rel_ppm2 ~ area, rq1_5),
+                   r2_of(log_rel_ppm2 ~ factor(year), rq1_5),
+                   r2_of(log_rel_ppm2 ~ area + factor(year), rq1_5),
+                   r2_of(log_rel_ppm2 ~ area + factor(year) + factor(quarter), rq1_5)))
+
+if (cgpi_ok) {
+  baseline$r2_real <- c(r2_of(log_real_ppm2 ~ area, rq1_5),
+                        r2_of(log_real_ppm2 ~ factor(year), rq1_5),
+                        r2_of(log_real_ppm2 ~ area + factor(year), rq1_5),
+                        r2_of(log_real_ppm2 ~ area + factor(year) + factor(quarter), rq1_5))
+}
+
+kable(baseline, digits = 3, caption = "Share of variance explained by fixed effects alone, district-quarters with 5+ houses")
+```
+
+For the relative response, district identity alone explains 34% and year alone 3% — the cycle is gone, as intended — and both together 37%. That is a lower ceiling than the real response's 63%, but it is the right kind of ceiling: it leaves 63% of the variance for features to explain, against 37% for the real response, and what is left is spread between places and over time *within* places — exactly what the features describe. Quarter adds nothing, so seasonality is not in this response.
+
+# Write out
+
+```{r}
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+write_rds(rq1, file.path(out_dir, "rq1_district_quarter.rds"))
+write_csv(rq1, file.path(out_dir, "rq1_district_quarter.csv"), na = "")
+
+cat("Written:", nrow(rq1), "rows ×", ncol(rq1), "columns to", normalizePath(out_dir), "\n")
+
+tibble(column = names(rq1), type = map_chr(rq1, ~ class(.x)[1])) %>%
+  kable(caption = "The columns of rq1_district_quarter, in order; the data dictionary is in 07_Supplementary-Submission/data_dictionary_rq1.md")
+```
+
+The table is written twice — as `.rds`, which keeps the column types, and as `.csv` for anyone outside R. Both live in `04_Analysis/data-local-only/processed/`, which stays out of the supplementary submission zip; the modelling document reads the `.rds`.
+
+# What this means for the modelling document
+
+The decisions handed on, in the order the next document will meet them:
+
+1. **Read `rq1_district_quarter.rds` and filter to `houses >= 5`** (8,662 rows). Run the linear model a second time with `weights = houses` as the sensitivity check, and report `houses >= 10` (7,443 rows, two districts gone entirely) as the other.
+2. **Two responses, one headline.** `log_real_ppm2` is the question as pitched; `log_rel_ppm2` is the question as worded and needs no deflator. Fit the headline models to both and choose with the time-ordered test set; say which one the poster uses and why.
+3. **District identity goes into the trees as `region` plus the district-level descriptors** (`log_dwellings`, `per1000_lag`, `m2_per_house`), never as the 67-level factor, which `tree()` and `randomForest()` refuse. One linear model with `area` as a factor is the fixed-effects ceiling to compare everything with.
+4. **Keep the lagged responses out of the headline models.** Fit one persistence benchmark with them, and read the structural models against it.
+5. **Tune inside the training years with blocked folds** — whole years, not random rows — and touch the test rows once, at the end.
+6. **Expect the test period to be harder** than cross-validation suggests: it contains 2021–22.
+7. **The real-dollar columns depend on the price index file** being in `data_root`; the relative response does not. If the file is missing the document still knits, with those columns empty.
+
+*End of document*

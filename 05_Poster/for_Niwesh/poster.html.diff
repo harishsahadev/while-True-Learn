@@ -1,0 +1,34 @@
+--- a/building-consents/communication/poster/poster.html	2026-11-18 22:41:31.151136648 +1300
++++ b/building-consents/communication/poster/poster.html	2026-11-18 22:42:49.465369536 +1300
+@@ -134,7 +134,7 @@
+             <td>baselines, linear, polynomial, ridge, lasso, elastic net, GAM, <b>regression tree</b>, <b>random forest</b>, XGBoost, SVM</td>
+             <td>linear regression (with district); random forest (without)</td></tr>
+         <tr><td><b>RQ2</b> clustering<br><span class="muted">66 districts</span></td>
+-            <td><b>k-means</b> and <b>hierarchical</b> (4 linkages); k chosen by 5 criteria</td>
++            <td><b>k-means</b> and <b>hierarchical</b> (4 linkages) on standardised features, Euclidean distance; k chosen by 5 criteria; no test set</td>
+             <td>k-means, k = 3</td></tr>
+         <tr><td><b>RQ3</b> classification<br><span class="muted">district × year</span></td>
+             <td>baselines, logistic, lasso, <b>LDA</b>, <b>QDA</b>, <b>classification tree</b>, KNN, random forest</td>
+@@ -167,18 +167,19 @@
+       <span class="chip">RQ2 · Clustering</span>
+       <div class="q">What kinds of building markets does New Zealand have?</div>
+       <div class="hyp">Hypothesis: districts form a few distinct market types.</div>
+-      <p>66 districts, nine features (2016–2026): dwelling mix, homes per resident, growth, volatility, cost, house size, commercial share.</p>
++      <p>66 districts (Chatham Islands left out), nine features (2016–2026): dwelling mix, homes per resident, growth, volatility, cost, house size, commercial share.</p>
+       <ul>
+         <li><b>House-building</b> (30): commuter belts, lifestyle and retirement areas</li>
+         <li><b>Slow provincial</b> (21): little, volatile building; cheapest</li>
+         <li><b>Urban medium-density</b> (15): cities and Queenstown; dearest</li>
+       </ul>
++      <p><b>Why three?</b> Two or three groups fit about equally well (silhouette 0.22 and 0.21). Three was the most stable over 100 resamples (0.84, against 0.74 for two).</p>
+     </div>
+     <div class="fig"><img src="../../outputs/figures/communication/c05_rq2_markets.png" alt="Three markets">
+-      <figcaption>Axes: first two principal components of the nine features.</figcaption></div>
++      <figcaption>Axes: principal components 1 and 2. Dashed: 80% ellipses.</figcaption></div>
+     <div class="fig"><img src="../../outputs/figures/communication/c06_rq2_profiles.png" alt="Market profiles">
+       <figcaption>Four of the nine clustering features.</figcaption></div>
+-    <div class="answer"><b>Answer:</b> three markets. k-means and Ward's clustering agree on 60 of 66 districts and the grouping is stable (0.85), but separation is weak (silhouette 0.21): a useful summary of a continuum.</div>
++    <div class="answer"><b>Answer:</b> New Zealand has three kinds of building market: house-building, slow provincial and urban medium-density. k-means and Ward's clustering agree on 60 of 66 districts, but the kinds overlap (silhouette 0.21).</div>
+   </section>
+ 
+   <!-- RQ3 -->

@@ -1,0 +1,141 @@
+--- a/building-consents/communication/make_figures.R	2026-11-18 22:41:31.145367581 +1300
++++ b/building-consents/communication/make_figures.R	2026-11-18 22:41:31.146715476 +1300
+@@ -55,27 +55,32 @@
+   scale_x_continuous(labels = scales::dollar, expand = expansion(mult = c(0, 0.05))) +
+   coord_cartesian(clip = "off") +
+   labs(title = "Building a new house costs very different amounts",
+-       subtitle = "Real cost per square metre of new houses, 2025 (districts with 50+ new houses)",
+-       x = NULL, y = NULL)
++       subtitle = "Cost per square metre of new houses in 2025: the five dearest and five cheapest districts",
++       x = NULL, y = NULL,
++       caption = "Districts with 50 or more new houses in 2025. June-2026 dollars.")
+ save_comm(p1, "c01_cost_by_district_2025", w = 10, h = 5.1)
+ 
+ # ---- 2. Inflation: nominal vs real --------------------------------------------
+ nz <- tab("rq1", "t02_nz_annual_cost_m2")
++ends2 <- nz |> filter(year %in% range(year))
++rise <- c(nominal = ends2$nominal[2] / ends2$nominal[1], real = ends2$real[2] / ends2$real[1])
+ p2 <- nz |> pivot_longer(c(nominal, real), names_to = "basis", values_to = "cost") |>
+   mutate(basis = recode(basis, nominal = "In the dollars of each year", real = "After removing building-cost inflation")) |>
+   ggplot(aes(year, cost, colour = basis)) +
+-  geom_line(linewidth = 1.6) +
++  geom_line(linewidth = 1.6, show.legend = FALSE) +
++  annotate("text", x = 2026, y = max(nz$real) + 230, hjust = 1, vjust = 0, size = 6.2, fontface = "bold", colour = pal["coral"],
++           label = paste0("After removing building-cost inflation: up ", round(100 * (rise["real"] - 1)), "%")) +
++  annotate("text", x = 2026, y = 560, hjust = 1, size = 6.2, fontface = "bold", colour = "#8C7B6A",
++           label = paste0("In the dollars of each year: ", sprintf("%.1f", rise["nominal"]), " times")) +
+   scale_colour_manual(values = c("In the dollars of each year" = "#B9AA9A",
+                                  "After removing building-cost inflation" = unname(pal["coral"]))) +
+-  scale_y_continuous(labels = scales::dollar) +
++  scale_x_continuous(breaks = seq(1990, 2020, 10), limits = c(1990, 2026)) +
++  scale_y_continuous(labels = scales::dollar, limits = c(330, 3900), breaks = c(1000, 2000, 3000)) +
+   labs(title = "Most of the rise in cost is inflation",
+-       subtitle = "New-house value per square metre, New Zealand", x = NULL, y = NULL, colour = NULL) +
+-  guides(colour = guide_legend(nrow = 2))
++       subtitle = "New-house value per square metre, New Zealand, 1991 to 2025", x = NULL, y = NULL, colour = NULL)
+ save_comm(p2, "c02_inflation", w = 9, h = 6)
+ 
+ # poster version: wider and shorter, lines labelled at their ends instead of a legend
+-ends2 <- nz |> filter(year %in% range(year))
+-rise <- c(nominal = ends2$nominal[2] / ends2$nominal[1], real = ends2$real[2] / ends2$real[1])
+ p2b <- nz |> pivot_longer(c(nominal, real), names_to = "basis", values_to = "cost") |>
+   ggplot(aes(year, cost, colour = basis)) +
+   geom_line(linewidth = 1.6, show.legend = FALSE) +
+@@ -143,20 +148,34 @@
+ pc <- prcomp(X2)
+ mk_cols <- c("House-building districts" = unname(pal["blue"]), "Slow provincial districts" = unname(pal["coral"]),
+              "Urban medium-density" = unname(pal["teal"]))
+-show_names <- c("Auckland", "Wellington", "Christchurch", "Queenstown-Lakes", "Selwyn", "Tasman",
+-                "Thames-Coromandel", "Wairoa", "Hamilton", "Clutha")
++# the districts named on the slide's three cards; each label is placed by hand so that it touches
++# no point and no other label (hjust/vjust: where the label sits against its point; dx/dy: nudge)
++lab_pos <- tribble(
++  ~name,              ~hjust, ~vjust, ~dx,   ~dy,
++  "Selwyn",            0.5,    1,     0.00, -0.24,
++  "Tasman",            0,      0.5,   0.30,  0.00,
++  "Waipa",             0,      1,     0.38, -0.29,
++  "Gore",              0,      1,     0.09, -0.18,
++  "Grey",              1,      0.5,  -0.12,  0.00,
++  "Wairoa",            0,      0.5,   0.12,  0.00,
++  "Queenstown-Lakes",  0.5,    0,     0.00,  0.24,
++  "Auckland",          0,      0.5,   0.20,  0.00,
++  "Christchurch",      0,      0.5,   0.12,  0.00,
++  "Wellington",        0,      0.5,   0.12,  0.00)
++show_names <- lab_pos$name
+ pdf2 <- as_tibble(pc$x[, 1:2]) |>
+   mutate(name = short(rq2$transformed$ta), market = factor(fit2$membership$market, levels = names(mk_cols)))
+ p6 <- ggplot(pdf2, aes(PC1, PC2, colour = market)) +
+   stat_ellipse(level = 0.8, linewidth = 0.9, linetype = 2, show.legend = FALSE) +
+   geom_point(size = 4, alpha = 0.9) +
+-  geom_text(data = pdf2 |> filter(name %in% show_names), aes(label = name), size = 4.8, vjust = -0.9,
++  geom_text(data = pdf2 |> inner_join(lab_pos, by = "name"),
++            aes(x = PC1 + dx, y = PC2 + dy, label = name, hjust = hjust, vjust = vjust), size = 4.8,
+             show.legend = FALSE, fontface = "bold") +
+   scale_colour_manual(values = mk_cols) +
+   scale_x_continuous(expand = expansion(mult = c(0.08, 0.18))) +
+-  scale_y_continuous(expand = expansion(mult = c(0.05, 0.12))) +
++  scale_y_continuous(expand = expansion(mult = c(0.12, 0.12))) +
+   labs(title = "Three kinds of building market",
+-       subtitle = "Each dot is a district (2016–2026); nearby dots build in similar ways",
++       subtitle = "Each dot is a district; nearby dots build in similar ways.\nDashed outlines show where most of each kind sit",
+        x = "Builds more homes per resident, bigger houses  →", y = "More townhouses, dearer  →",
+        colour = NULL) +
+   theme(axis.text = element_blank(), panel.grid.major.y = element_blank()) +
+@@ -184,10 +203,12 @@
+   facet_wrap(~name, scales = "free_y", nrow = 1) +
+   scale_fill_manual(values = mk_cols) +
+   scale_y_continuous(expand = expansion(mult = c(0.15, 0.2))) +
+-  labs(title = "How the three markets differ (median district)", x = NULL, y = NULL, fill = NULL) +
++  labs(title = "How the three markets differ (the middle district of each kind)", x = NULL, y = NULL, fill = NULL) +
+   theme(axis.text.x = element_blank(), strip.text = element_text(size = 15, face = "bold"),
+         panel.grid.major.y = element_blank(), axis.text.y = element_blank())
+ save_comm(p7, "c06_rq2_profiles", w = 12, h = 5.5)
++# slide version: taller, so the text prints larger in slide 8's card (as c02 and c02b are a pair)
++save_comm(p7 + theme(legend.text = element_text(size = 15)), "c06s_rq2_profiles_slide", w = 9.6, h = 6.2)
+ 
+ # ---- 8. RQ3: share of districts rising each year ---------------------------------------
+ rq3 <- readRDS(file.path(paths$processed, "rq3_model_data.rds"))$data
+@@ -224,4 +245,43 @@
+        x = NULL, y = NULL)
+ save_comm(p9, "c08_rq3_accuracy", w = 10, h = 5)
+ 
++# ---- 10. RQ2: how the number of groups was chosen (appendix page) ----------------------
++ck <- tab("rq2", "t02_choose_k") |>
++  select(k, `How well districts fit their group\n(silhouette, from -1 to 1)` = silhouette,
++         `How repeatable the grouping is\n(agreement over 100 resamples; 1 = identical)` = stability) |>
++  pivot_longer(-k) |> mutate(name = fct_inorder(name), chosen = k == 3)
++p10 <- ggplot(ck, aes(factor(k), value, fill = chosen)) +
++  geom_col(width = 0.7) +
++  geom_text(aes(label = sprintf("%.2f", value)), vjust = -0.4, size = 5.2, fontface = "bold", colour = pal["slate"]) +
++  facet_wrap(~name, scales = "free_y", nrow = 1) +
++  scale_fill_manual(values = c(`TRUE` = unname(pal["coral"]), `FALSE` = unname(pal["grey"])), guide = "none") +
++  scale_y_continuous(expand = expansion(mult = c(0, 0.16))) +
++  labs(title = "Two or three groups fit about equally well; three is the most repeatable",
++       x = "Number of groups", y = NULL) +
++  theme(strip.text = element_text(size = 15, face = "bold"), axis.text.y = element_blank(),
++        panel.grid.major.y = element_blank())
++save_comm(p10, "c09_rq2_choose_k", w = 11, h = 4.6)
++
++# ---- 11. RQ2: all nine measures for each market, against the average district (poster option) ----
++meas <- c(dwell_per_1000 = "Homes per 1,000 residents", town_share = "Townhouses", apt_share = "Apartments",
++          retire_share = "Retirement units", house_m2 = "House size", rel_cost = "Building cost",
++          nonres_share = "Commercial share", growth = "Recent growth", volatility = "Ups and downs")
++prof <- as_tibble(X2) |>
++  mutate(market = factor(fit2$membership$market, levels = names(mk_cols))) |>
++  group_by(market) |> summarise(across(everything(), mean)) |>
++  pivot_longer(-market, names_to = "var", values_to = "z") |>
++  mutate(measure = factor(meas[var], levels = rev(unname(meas))),
++         panel = factor(str_remove(as.character(market), " districts"),
++                        levels = str_remove(names(mk_cols), " districts")))
++p11 <- ggplot(prof, aes(z, measure, fill = market)) +
++  geom_col(width = 0.7, show.legend = FALSE) +
++  geom_vline(xintercept = 0, colour = "grey40") +
++  facet_wrap(~panel, nrow = 1) +
++  scale_fill_manual(values = mk_cols) +
++  scale_x_continuous(breaks = c(-1, 0, 1), labels = c("below", "average", "above"), limits = c(-1.25, 1.55)) +
++  labs(title = "How each market differs from the average district", x = NULL, y = NULL) +
++  theme(strip.text = element_text(size = 16, face = "bold"), panel.grid.major.y = element_blank(),
++        panel.grid.major.x = element_line(colour = "#EADFD3"), axis.text.x = element_text(size = 13))
++save_comm(p11, "c06b_rq2_profiles_all", w = 12, h = 5.5)
++
+ list.files(out_dir)
